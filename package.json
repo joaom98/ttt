@@ -1,0 +1,21 @@
+{
+  "name": "ttt",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tank Turn Tactics — an online ice-breaker game for playtesting with friends",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/src/index.ts",
+    "start": "node --disable-warning=ExperimentalWarning server/src/index.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test \"shared/test/**/*.test.ts\" \"server/test/**/*.test.ts\"",
+    "test:watch": "node --disable-warning=ExperimentalWarning --test --watch \"shared/test/**/*.test.ts\" \"server/test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.8.0"
+  }
+}
