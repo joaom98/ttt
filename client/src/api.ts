@@ -1,7 +1,7 @@
 // Thin wrapper around the server's HTTP API plus the per-game session stored in localStorage.
 
 import type { GameConfig, PlayerAction } from "../../shared/src/types.ts";
-import type { LobbySummary, StateMessage } from "../../shared/src/view.ts";
+import type { BotPersonality, LobbySummary, StateMessage } from "../../shared/src/view.ts";
 
 export interface Session {
   gameId: string;
@@ -65,12 +65,18 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
 
 export const api = {
   lobbies: () => call<{ lobbies: LobbySummary[] }>("/api/games"),
-  create: (name: string, preset: string, config: Partial<GameConfig>) =>
-    call<{ gameId: string; playerId: string; token: string }>("/api/games", { name, preset, config }),
+  create: (name: string, preset: string, config: Partial<GameConfig>, bots: BotPersonality[] = []) =>
+    call<{ gameId: string; playerId: string; token: string }>("/api/games", { name, preset, config, bots }),
   join: (gameId: string, name: string) =>
     call<{ playerId: string; token: string }>(`/api/games/${gameId}/join`, { name }),
   act: (session: Session, action: PlayerAction) =>
     call<{ ok: true }>(`/api/games/${session.gameId}/actions`, { token: session.token, action }),
+  say: (session: Session, text: string, to: string | null) =>
+    call<{ ok: true }>(`/api/games/${session.gameId}/chat`, { token: session.token, text, to }),
+  addBot: (session: Session, personality: BotPersonality) =>
+    call<{ ok: true }>(`/api/games/${session.gameId}/bots`, { token: session.token, personality }),
+  removeBot: (session: Session, playerId: string) =>
+    call<{ ok: true }>(`/api/games/${session.gameId}/bots/remove`, { token: session.token, playerId }),
   forceTick: (session: Session) =>
     call<{ ok: true }>(`/api/games/${session.gameId}/debug/tick`, { token: session.token }),
 };

@@ -6,8 +6,17 @@
 import { PRESETS } from "../../shared/src/config.ts";
 import { canApply, distance, juryTally, livingTanks, tankAt } from "../../shared/src/rules.ts";
 import type { GameConfig, GameState, PlayerAction, Tank } from "../../shared/src/types.ts";
-import type { StateMessage } from "../../shared/src/view.ts";
+import { BOT_PERSONALITIES, type BotPersonality, type ChatMessage, type StateMessage } from "../../shared/src/view.ts";
 import { api, clearSession, lastName, loadSession, rememberName, saveSession, subscribe, type Session } from "./api.ts";
+
+const BOT_LABELS: Record<BotPersonality, string> = {
+  hunter: "Hunter — chases and shoots the weakest tank",
+  turtle: "Turtle — saves up, upgrades range, picks off easy kills",
+  wildcard: "Wildcard — random moves, shots and gifts",
+};
+
+/** The lineup for the one-click practice game on the home screen. */
+const PRACTICE_BOTS: BotPersonality[] = ["hunter", "turtle", "wildcard"];
 
 const app = document.getElementById("app")!;
 const toastEl = document.getElementById("toast")!;
@@ -82,7 +91,10 @@ async function renderHome(): Promise<void> {
             ${checkField("debug", "Debug mode (host can force ticks)", null)}
           </div>
         </details>
-        <button type="submit" class="primary">Create game</button>
+        <div class="row">
+          <button type="submit" class="primary">Create game</button>
+          <button type="button" data-act="practice" title="Start a Quick game right away against ${PRACTICE_BOTS.length} bots">Practice vs bots</button>
+        </div>
       </form>
       <div class="card">
         <h2>Join a game</h2>
@@ -180,8 +192,40 @@ function renderGame(): void {
   if (!m) return;
   const s = m.state;
   document.title = `${s.phase === "lobby" ? "Lobby" : `Tick ${s.tick}`} · ${s.id} · Tank Turn Tactics`;
+  const restore = preserveInputs();
   app.innerHTML = s.phase === "lobby" ? lobbyView(s) : boardView(s);
+  restore();
   updateCountdown();
+}
+
+/**
+ * The screen is rebuilt on every update (ticks, bot moves, chat), so remember what the player is
+ * typing, where their cursor is and how far the chat is scrolled, and put it all back afterwards.
+ */
+function preserveInputs(): () => void {
+  const fields = [...app.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input[id]:not([readonly]), select[id]")]
+    .map((el) => ({ id: el.id, value: el.value }));
+  const active = document.activeElement;
+  const focusId = active instanceof HTMLElement && app.contains(active) ? active.id : "";
+  const caret = active instanceof HTMLInputElement && active.type === "text" ? [active.selectionStart, active.selectionEnd] : null;
+  const log = document.getElementById("chat-log");
+  const stuckToBottom = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+  const scrollTop = log?.scrollTop ?? 0;
+  return () => {
+    for (const f of fields) {
+      const el = document.getElementById(f.id) as HTMLInputElement | HTMLSelectElement | null;
+      if (!el) continue;
+      // A select keeps its default if the remembered option is gone (e.g. that player left).
+      if (el instanceof HTMLSelectElement && ![...el.options].some((o) => o.value === f.value)) continue;
+      el.value = f.value;
+    }
+    const newLog = document.getElementById("chat-log");
+    if (newLog) newLog.scrollTop = stuckToBottom ? newLog.scrollHeight : scrollTop;
+    const el = focusId ? document.getElementById(focusId) : null;
+    if (!el) return;
+    el.focus();
+    if (caret && el instanceof HTMLInputElement) el.setSelectionRange(caret[0]!, caret[1]!);
+  };
 }
 
 function me(s: GameState): Tank | undefined {
@@ -193,18 +237,26 @@ function lobbyView(s: GameState): string {
   const isHost = mine?.id === s.hostId;
   const link = `${location.origin}/?game=${s.id}`;
   const c = s.config;
+  const bots = ui.msg?.bots ?? {};
   const players = s.order
     .map((id) => s.tanks[id]!)
-    .map((t) => `<li><span class="swatch" style="--c:${t.color}"></span>${esc(t.name)}${t.id === s.hostId ? ` <span class="badge">host</span>` : ""}${t.id === mine?.id ? ` <span class="badge you">you</span>` : ""}</li>`)
+    .map((t) => `<li><span class="swatch" style="--c:${t.color}"></span>${esc(t.name)}${t.id === s.hostId ? ` <span class="badge">host</span>` : ""}${t.id === mine?.id ? ` <span class="badge you">you</span>` : ""}
+      ${bots[t.id] ? ` <span class="badge bot" title="${esc(BOT_LABELS[bots[t.id]!])}">🤖 ${bots[t.id]}</span>` : ""}
+      ${bots[t.id] && isHost ? `<button class="link small" data-act="remove-bot" data-id="${t.id}" aria-label="Remove ${esc(t.name)}">Remove</button>` : ""}</li>`)
     .join("");
+  const botOptions = BOT_PERSONALITIES.map((p) => `<option value="${p}">${esc(BOT_LABELS[p])}</option>`).join("");
   return `
     <nav class="top"><a href="/" data-link>← Home</a><span class="muted">Game <b>${s.id}</b></span></nav>
-    <div class="lobby card">
+    <div class="lobby">
+    <div class="card">
       <h2>Lobby</h2>
       <p>Share this link with friends:</p>
       <div class="row"><input readonly value="${esc(link)}" id="share-link" /><button data-act="copy">Copy</button></div>
       <h3>Players (${s.order.length})</h3>
       <ul class="players">${players}</ul>
+      ${isHost
+        ? `<div class="row add-bot"><select id="bot-kind" aria-label="Kind of bot">${botOptions}</select><button data-act="add-bot">Add bot</button></div>`
+        : ""}
       <p class="muted small">
         ${c.startingHearts} hearts · range ${c.startingRange} · ${c.startingAP} starting AP ·
         ${c.apPerTick} AP every ${fmtDuration(c.tickIntervalMs)} · range upgrade ${c.upgradeRangeCost} AP ·
@@ -217,9 +269,11 @@ function lobbyView(s: GameState): string {
             <button data-act="leave">Leave</button>
           </div>`
         : `<form id="lobby-join" class="row">
-            <input name="name" placeholder="Your name" maxlength="20" required value="${esc(lastName())}" />
+            <input name="name" id="join-name" placeholder="Your name" maxlength="20" required value="${esc(lastName())}" />
             <button type="submit" class="primary">Join</button>
           </form>`}
+    </div>
+    ${chatPanel(s, mine)}
     </div>`;
 }
 
@@ -259,6 +313,7 @@ function boardView(s: GameState): string {
         ${mine ? myPanel(s, mine) : ""}
         ${target ? targetPanel(s, mine, target) : ""}
         ${playersPanel(s, mine)}
+        ${chatPanel(s, mine)}
         ${logPanel(s)}
       </aside>
     </div>`;
@@ -336,6 +391,7 @@ function targetPanel(s: GameState, mine: Tank | undefined, t: Tank): string {
         ${dist !== null ? `<div><b>${dist}</b><span>away</span></div>` : ""}
       </div>
       ${buttons}
+      ${mine && t.id !== mine.id && !ui.msg?.bots[t.id] ? `<button class="small dm" data-act="dm">✉️ Message privately</button>` : ""}
     </div>`;
 }
 
@@ -347,7 +403,7 @@ function playersPanel(s: GameState, mine: Tank | undefined): string {
     .sort((a, b) => Number(b.alive) - Number(a.alive))
     .map((t) => `
       <tr class="${t.alive ? "" : "dead"} ${t.id === ui.targetId ? "targeted" : ""}" data-tank="${t.id}">
-        <td><span class="swatch" style="--c:${t.color}"></span>${esc(t.name)}${t.id === mine?.id ? " (you)" : ""}</td>
+        <td><span class="swatch" style="--c:${t.color}"></span>${esc(t.name)}${t.id === mine?.id ? " (you)" : ""}${ui.msg?.bots[t.id] ? ` <span title="Bot">🤖</span>` : ""}</td>
         <td>${t.alive ? t.hearts : "✖"}</td><td>${t.ap}</td><td>${t.range}</td>
         <td>${tally[t.id] ? "🗳️" : ""}</td>
       </tr>`)
@@ -363,9 +419,40 @@ function logPanel(s: GameState): string {
   const items = s.log
     .slice(-40)
     .reverse()
-    .map((e) => `<li><span class="muted small">${new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span> ${esc(e.text)}</li>`)
+    .map((e) => `<li><span class="muted small">${fmtTime(e.at)}</span> ${esc(e.text)}</li>`)
     .join("");
   return `<div class="card"><h3>Events</h3><ul class="log">${items}</ul></div>`;
+}
+
+function chatPanel(s: GameState, mine: Tank | undefined): string {
+  const chat = ui.msg?.chat ?? [];
+  const bots = ui.msg?.bots ?? {};
+  const name = (id: string) => esc(s.tanks[id]?.name ?? "someone");
+  const items = chat.map((m: ChatMessage) => {
+    const color = s.tanks[m.from]?.color ?? "var(--muted)";
+    const who = m.to === null
+      ? `<b>${name(m.from)}</b>`
+      : `<b>${name(m.from)}</b> → <b>${name(m.to)}</b> <span class="muted">(private)</span>`;
+    return `<li class="${m.to === null ? "" : "private"}"><span class="swatch" style="--c:${color}"></span>
+      <span class="muted small">${fmtTime(m.at)}</span> ${who}: ${esc(m.text)}</li>`;
+  }).join("");
+  const others = s.order
+    .filter((id) => id !== mine?.id && !bots[id])
+    .map((id) => `<option value="${id}">🔒 ${name(id)}</option>`)
+    .join("");
+  const form = mine
+    ? `<form id="chat-form" class="row chat-form">
+        <select name="to" id="chat-to" aria-label="Send to"><option value="">Everyone</option>${others}</select>
+        <input name="text" id="chat-input" maxlength="300" autocomplete="off" placeholder="Say something…" />
+        <button type="submit">Send</button>
+      </form>`
+    : `<p class="muted small">Join the game to chat.</p>`;
+  return `
+    <div class="card chat">
+      <h3>Chat</h3>
+      <ul class="chat-log" id="chat-log">${items || `<li class="muted small">No messages yet. Make some deals!</li>`}</ul>
+      ${form}
+    </div>`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -380,7 +467,7 @@ app.addEventListener("click", (e) => {
     return;
   }
   const button = el.closest<HTMLButtonElement>("button[data-act]");
-  if (button) return void onButton(button.dataset.act!);
+  if (button) return void onButton(button.dataset.act!, button);
   const cell = el.closest<HTMLElement>(".cell");
   if (cell) return onCell(Number(cell.dataset.x), Number(cell.dataset.y), cell.dataset.tank);
   const row = el.closest<HTMLElement>("tr[data-tank]");
@@ -410,6 +497,13 @@ app.addEventListener("submit", async (e) => {
       ui.session = { gameId: ui.gameId, playerId: r.playerId, token: r.token };
       saveSession(ui.session);
       connect(); // reconnect so the stream knows who we are
+    } else if (form.id === "chat-form" && ui.session) {
+      const text = String(data.get("text") ?? "").trim();
+      if (!text) return;
+      await api.say(ui.session, text, String(data.get("to") ?? "") || null);
+      // The screen may have been rebuilt while sending, so look the input up again.
+      const input = document.getElementById("chat-input") as HTMLInputElement | null;
+      if (input) input.value = "";
     }
   } catch (err) {
     toast((err as Error).message);
@@ -422,7 +516,8 @@ const KEY_DIRS: Record<string, [number, number]> = {
 };
 
 document.addEventListener("keydown", (e) => {
-  if (e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey || e.altKey) return;
+  const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement;
+  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   const s = ui.msg?.state;
   const mine = s && me(s);
   if (e.key === "Escape" && ui.targetId) {
@@ -455,12 +550,28 @@ function onCell(x: number, y: number, tankId: string | undefined): void {
   }
 }
 
-async function onButton(act: string): Promise<void> {
+async function onButton(act: string, button: HTMLButtonElement): Promise<void> {
   const s = ui.msg?.state;
   const mine = s && me(s);
   const target = ui.targetId ?? "";
   switch (act) {
     case "home": return goTo(null);
+    case "practice": return startPractice(button.form);
+    case "add-bot": {
+      const kind = (document.getElementById("bot-kind") as HTMLSelectElement | null)?.value as BotPersonality | undefined;
+      if (ui.session && kind) await guard(() => api.addBot(ui.session!, kind));
+      return;
+    }
+    case "remove-bot":
+      if (ui.session && button.dataset.id) await guard(() => api.removeBot(ui.session!, button.dataset.id!));
+      return;
+    case "dm": {
+      const to = document.getElementById("chat-to") as HTMLSelectElement | null;
+      const input = document.getElementById("chat-input") as HTMLInputElement | null;
+      if (to && target) to.value = target;
+      input?.focus();
+      return;
+    }
     case "copy": {
       const input = document.getElementById("share-link") as HTMLInputElement | null;
       if (!input) return;
@@ -499,6 +610,20 @@ async function onButton(act: string): Promise<void> {
     ui.session = null;
     goTo(null);
   }
+}
+
+/** One click from the home screen to a running Quick game against bots. */
+async function startPractice(form: HTMLFormElement | null): Promise<void> {
+  if (!form?.reportValidity()) return;
+  const name = String(new FormData(form).get("name")).trim();
+  rememberName(name);
+  await guard(async () => {
+    const r = await api.create(name, "quick", {}, PRACTICE_BOTS);
+    const session = { gameId: r.gameId, playerId: r.playerId, token: r.token };
+    saveSession(session);
+    await api.act(session, { type: "start", playerId: r.playerId, now: 0 });
+    goTo(r.gameId);
+  });
 }
 
 function confirmShoot(s: GameState, targetId: string): boolean {
@@ -557,6 +682,10 @@ function fmtDuration(ms: number, precise = false): string {
   if (h) return precise ? `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s` : `${h}h${m ? ` ${m}m` : ""}`;
   if (m) return precise ? `${m}m ${String(sec).padStart(2, "0")}s` : `${m}m${sec ? ` ${sec}s` : ""}`;
   return `${sec}s`;
+}
+
+function fmtTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function colName(x: number): string {

@@ -18,9 +18,12 @@ cd ttt
 npm run dev
 ```
 
-Open <http://localhost:3000>, create a game with the **Quick** pace, then open the share link in one or two
-private/incognito windows to join as other players. In Quick games the host has a **Force tick** button so
-you don't have to wait for AP.
+Open <http://localhost:3000> and click **Practice vs bots** to jump straight into a Quick game against three
+bots. Or create a game, add bots from the lobby, and open the share link in private/incognito windows to join
+as other players. In Quick games the host has a **Force tick** button so you don't have to wait for AP.
+
+Every game has a text chat: messages to **Everyone**, or private messages to one player (pick them in the
+chat's recipient menu, or click their tank and hit **Message privately**) for secret deals.
 
 `npm install` is optional: it only installs TypeScript for `npm run typecheck`.
 
@@ -46,8 +49,9 @@ shared/src/      game rules — pure functions used by both server and browser
   rules.ts       applyAction(state, action) -> new state | error   ← most iteration happens here
   view.ts        what each player is allowed to see (jury votes stay secret)
 shared/test/     rules tests
-server/src/      HTTP API, live updates (server-sent events), tick clock, saving games
-server/test/     API tests
+server/src/      HTTP API, live updates (server-sent events), tick clock, chat, saving games
+  bots.ts        rule-based bot players (hunter / turtle / wildcard)
+server/test/     API and bot tests
 client/          the browser UI (plain TypeScript + CSS, no framework)
 ```
 
@@ -65,22 +69,31 @@ and buttons to enable, so the UI and the server always agree on what's legal.
   `client/src/main.ts`.
 - **Change the pace presets:** `PRESETS` in `shared/src/config.ts`.
 - **Change the UI:** `client/src/main.ts` and `client/style.css` — just refresh the browser.
+- **Change how bots play:** `chooseBotAction` in `server/src/bots.ts`. Bots only ever send normal player
+  actions, so they can't break the rules.
 
 ## Playtesting with friends
 
-**From your own computer (quickest):** run `npm start`, then expose port 3000 with a tunnel, e.g.
-[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
+Matches are meant to be short — one sitting, Quick pace — so nothing needs to survive a restart.
+
+**The website (Render, free):** `render.yaml` describes the service. One-time setup:
+
+1. Sign up at <https://render.com> with your GitHub account.
+2. **New → Blueprint**, pick the `ttt` repository, and confirm. Render builds it and gives you a
+   `https://tank-turn-tactics….onrender.com` address to share.
+3. From then on, every push to `main` redeploys automatically.
+
+The free plan sleeps after ~15 minutes without visitors; the first visit after that takes about a minute
+to wake up. A redeploy or a sleep ends any game in progress, so don't push mid-match.
+
+**From your own computer:** run `npm start`, then expose port 3000 with a
+[Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
 
 ```bash
 cloudflared tunnel --url http://localhost:3000
 ```
 
-Share the printed `https://….trycloudflare.com` link. Everything (page, API, live updates) goes through
-that one port. Your computer has to stay on for the length of the game.
-
-**Hosted (for multi-day games):** any host that runs a long-lived Node process works (Render, Railway,
-Fly.io, a small VPS). Use `npm start` as the start command and point `DATA_DIR` at a persistent disk or
-volume so games survive redeploys.
+Share the printed `https://….trycloudflare.com` link. Your computer has to stay on for the game.
 
 ## Roadmap ideas
 
@@ -88,4 +101,5 @@ volume so games survive redeploys.
   database once there are many concurrent games.
 - Accounts instead of per-browser tokens; notifications when AP arrives.
 - Randomised tick time each day (the original moved the AP drop to stop people camping the clock).
+- A Claude-powered bot that negotiates in chat (the bot hook in `server/src/bots.ts` is where it would go).
 - More ice-breaker games reusing the same lobby + live-state plumbing.
