@@ -53,6 +53,7 @@ server/src/      HTTP API, live updates (server-sent events), tick clock, chat, 
   bots.ts        rule-based bot players (hunter / turtle / wildcard)
 server/test/     API and bot tests
 client/          the browser UI (plain TypeScript + CSS, no framework)
+  src/fx.ts      action animations (slides, shots, range buffs), driven by the action behind each update
 ```
 
 How a move flows: the browser POSTs an action → the server runs it through `applyAction` with the

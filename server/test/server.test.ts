@@ -5,7 +5,7 @@ import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app.ts";
 import { GameStore } from "../src/store.ts";
-import type { StateMessage } from "../../shared/src/view.ts";
+import { publicCause, type StateMessage } from "../../shared/src/view.ts";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 let clock = 1_000_000;
@@ -94,10 +94,17 @@ describe("game API", () => {
     const first = await readMessage();
     assert.equal(first.you, host.playerId);
     assert.equal(first.state.tick, 2);
+    assert.equal(first.cause, null);
     await api(`/api/games/${gameId}/debug/tick`, { token: host.token });
     const second = await readMessage();
     assert.equal(second.state.tick, 3);
+    assert.equal(second.cause?.type, "tick"); // lets the browser animate what just happened
     await reader.cancel();
+  });
+
+  it("never reveals a jury vote as the cause of an update", () => {
+    assert.equal(publicCause({ type: "juryVote", playerId: "a", targetId: "b" }), null);
+    assert.deepEqual(publicCause({ type: "upgradeRange", playerId: "a" }), { type: "upgradeRange", playerId: "a" });
   });
 });
 
