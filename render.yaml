@@ -1,0 +1,15 @@
+# Render Blueprint: one free web service that redeploys whenever the default branch changes.
+# Free services sleep after ~15 idle minutes (the first visit then takes ~1 minute to wake) and
+# keep no disk between restarts, so games in progress are lost on a redeploy. Fine for short matches.
+services:
+  - type: web
+    name: tank-turn-tactics
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/games
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "24"

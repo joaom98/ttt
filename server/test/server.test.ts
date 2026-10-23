@@ -101,6 +101,95 @@ describe("game API", () => {
   });
 });
 
+describe("chat", () => {
+  let gameId = "";
+  let ana = { playerId: "", token: "" };
+  let bia = { playerId: "", token: "" };
+  let caio = { playerId: "", token: "" };
+
+  it("delivers public messages to everyone and private ones only to the two players", async () => {
+    ana = (await api("/api/games", { name: "Ana" })).json;
+    gameId = (ana as unknown as { gameId: string }).gameId;
+    bia = (await api(`/api/games/${gameId}/join`, { name: "Bia" })).json;
+    caio = (await api(`/api/games/${gameId}/join`, { name: "Caio" })).json;
+
+    assert.equal((await api(`/api/games/${gameId}/chat`, { token: ana.token, text: "  hi all  " })).status, 200);
+    clock += 1000;
+    assert.equal((await api(`/api/games/${gameId}/chat`, { token: ana.token, text: "ally?", to: bia.playerId })).status, 200);
+
+    const seenBy = async (token: string) =>
+      ((await api(`/api/games/${gameId}?token=${token}`)).json as StateMessage).chat.map((m) => m.text);
+    assert.deepEqual(await seenBy(ana.token), ["hi all", "ally?"]);
+    assert.deepEqual(await seenBy(bia.token), ["hi all", "ally?"]);
+    assert.deepEqual(await seenBy(caio.token), ["hi all"]);
+    assert.deepEqual(await seenBy(""), ["hi all"]);
+  });
+
+  it("rejects strangers, empty messages, unknown recipients and spam", async () => {
+    assert.equal((await api(`/api/games/${gameId}/chat`, { token: "nope", text: "x" })).status, 403);
+    clock += 1000;
+    assert.equal((await api(`/api/games/${gameId}/chat`, { token: caio.token, text: "   " })).status, 400);
+    assert.equal((await api(`/api/games/${gameId}/chat`, { token: caio.token, text: "x", to: "ghost" })).status, 400);
+    assert.equal((await api(`/api/games/${gameId}/chat`, { token: caio.token, text: "x", to: caio.playerId })).status, 400);
+    assert.equal((await api(`/api/games/${gameId}/chat`, { token: caio.token, text: "one" })).status, 200);
+    assert.equal((await api(`/api/games/${gameId}/chat`, { token: caio.token, text: "two" })).status, 429);
+  });
+});
+
+describe("bots", () => {
+  it("lets only the host add and remove bots in the lobby", async () => {
+    const host = (await api("/api/games", { name: "Ana", preset: "quick", bots: ["hunter", "nonsense"] })).json;
+    const { gameId } = host;
+    const guest = (await api(`/api/games/${gameId}/join`, { name: "Bia" })).json;
+    const bots = () => store.botsOf(gameId);
+    assert.deepEqual(Object.values(bots()), ["hunter"]);
+
+    assert.equal((await api(`/api/games/${gameId}/bots`, { token: guest.token, personality: "turtle" })).status, 403);
+    assert.equal((await api(`/api/games/${gameId}/bots`, { token: host.token, personality: "nonsense" })).status, 400);
+    assert.equal((await api(`/api/games/${gameId}/bots`, { token: host.token, personality: "turtle" })).status, 200);
+    assert.deepEqual(Object.values(bots()).sort(), ["hunter", "turtle"]);
+
+    const turtle = Object.keys(bots()).find((id) => bots()[id] === "turtle")!;
+    assert.equal((await api(`/api/games/${gameId}/bots/remove`, { token: host.token, playerId: guest.playerId })).status, 400);
+    assert.equal((await api(`/api/games/${gameId}/bots/remove`, { token: host.token, playerId: turtle })).status, 200);
+    assert.equal(store.get(gameId)!.order.length, 3);
+  });
+
+  it("play on their own once the game starts", async () => {
+    const host = (await api("/api/games", { name: "Ana", preset: "quick", bots: ["hunter", "hunter"] })).json;
+    const { gameId } = host;
+    await api(`/api/games/${gameId}/actions`, { token: host.token, action: { type: "start" } });
+    const s = store.get(gameId)!;
+    const [a, b] = Object.keys(store.botsOf(gameId)).map((id) => s.tanks[id]!);
+    // Park the two hunters next to each other with AP to burn.
+    a!.x = 0; a!.y = 0; a!.ap = 5;
+    b!.x = 1; b!.y = 0; b!.ap = 5;
+    s.tanks[host.playerId]!.x = 7; // far corner of the 8x8 board
+    s.tanks[host.playerId]!.y = 7;
+    store.runBots(); // first call only schedules their thinking time
+    const before = a!.hearts + b!.hearts;
+    for (let i = 0; i < 10; i++) {
+      clock += 5000;
+      store.runBots();
+    }
+    const after = store.get(gameId)!;
+    assert.ok(after.tanks[a!.id]!.hearts + after.tanks[b!.id]!.hearts < before, "the bots should have shot each other");
+  });
+
+  it("closes the lobby when the last human leaves", async () => {
+    const host = (await api("/api/games", { name: "Ana", bots: ["turtle"] })).json;
+    await api(`/api/games/${host.gameId}/actions`, { token: host.token, action: { type: "leave" } });
+    assert.equal(store.get(host.gameId), undefined);
+  });
+
+  it("never hands the host role to a bot", async () => {
+    const host = (await api("/api/games", { name: "Ana", bots: ["turtle"] })).json;
+    const guest = (await api(`/api/games/${host.gameId}/join`, { name: "Bia" })).json;
+    await api(`/api/games/${host.gameId}/actions`, { token: host.token, action: { type: "leave" } });
+    assert.equal(store.get(host.gameId)!.hostId, guest.playerId);
+  });
+});
+
 describe("static files", () => {
   it("serves the client and strips TypeScript types", async () => {
     const html = await fetch(`${base}/`);

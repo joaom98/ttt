@@ -1,18 +1,21 @@
 // HTTP layer: a tiny JSON API, a Server-Sent Events stream per game, and static files.
 //
 //   GET  /api/games                    open lobbies
-//   POST /api/games                    { name, preset?, config? }        -> { gameId, playerId, token }
+//   POST /api/games                    { name, preset?, config?, bots? } -> { gameId, playerId, token }
 //   GET  /api/games/:id?token=         current state (as that player sees it)
 //   POST /api/games/:id/join           { name }                          -> { playerId, token }
 //   POST /api/games/:id/actions        { token, action }                 -> { ok } | { error }
+//   POST /api/games/:id/chat           { token, text, to? }              (to = player id for a private message)
+//   POST /api/games/:id/bots           { token, personality }            (host, lobby only)
+//   POST /api/games/:id/bots/remove    { token, playerId }               (host, lobby only)
 //   POST /api/games/:id/debug/tick     { token }                         (host, debug games only)
 //   GET  /api/games/:id/events?token=  text/event-stream of StateMessage
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { GameConfig, PlayerAction } from "../../shared/src/types.ts";
+import type { GameConfig, GameState, PlayerAction } from "../../shared/src/types.ts";
 import { viewFor, type StateMessage } from "../../shared/src/view.ts";
 import { serveStatic } from "./static.ts";
-import type { GameStore, Outcome } from "./store.ts";
+import { isPersonality, type GameStore, type Outcome } from "./store.ts";
 
 const MAX_BODY_BYTES = 16 * 1024;
 const HEARTBEAT_MS = 25_000;
@@ -43,7 +46,8 @@ export function createApp(store: GameStore, rootDir: string, now: () => number =
         const name = typeof body.name === "string" ? body.name : "";
         const preset = typeof body.preset === "string" ? body.preset : undefined;
         const config = isObject(body.config) ? (body.config as Partial<GameConfig>) : undefined;
-        return reply(res, store.create(name, preset, config));
+        const bots = Array.isArray(body.bots) ? body.bots.filter(isPersonality) : [];
+        return reply(res, store.create(name, preset, config, bots));
       }
     }
 
@@ -51,7 +55,7 @@ export function createApp(store: GameStore, rootDir: string, now: () => number =
       const state = store.get(gameId);
       if (!state) return sendJson(res, 404, { error: "Game not found." });
       const you = store.playerForToken(gameId, url.searchParams.get("token"));
-      return sendJson(res, 200, message(state, you));
+      return sendJson(res, 200, message(gameId, state, you));
     }
 
     if (gameId && req.method === "GET" && sub === "events") {
@@ -69,17 +73,27 @@ export function createApp(store: GameStore, rootDir: string, now: () => number =
         const r = store.act(gameId, token, body.action as PlayerAction);
         return r.ok ? sendJson(res, 200, { ok: true }) : sendJson(res, r.status, { error: r.error });
       }
-      if (sub === "debug/tick") {
-        const r = store.forceTick(gameId, token);
-        return r.ok ? sendJson(res, 200, { ok: true }) : sendJson(res, r.status, { error: r.error });
+      if (sub === "chat") {
+        const text = typeof body.text === "string" ? body.text : "";
+        const to = typeof body.to === "string" && body.to ? body.to : null;
+        return done(res, store.say(gameId, token, text, to));
       }
+      if (sub === "bots") {
+        return done(res, store.addBot(gameId, token, typeof body.personality === "string" ? body.personality : ""));
+      }
+      if (sub === "bots/remove") {
+        return done(res, store.removeBot(gameId, token, typeof body.playerId === "string" ? body.playerId : ""));
+      }
+      if (sub === "debug/tick") return done(res, store.forceTick(gameId, token));
     }
 
     sendJson(res, 404, { error: "Not found." });
   }
 
-  function message(state: Parameters<typeof viewFor>[0], you: string | null): StateMessage {
-    return { state: viewFor(state, you), serverNow: now(), you };
+  function message(gameId: string, state: GameState, you: string | null): StateMessage {
+    return {
+      state: viewFor(state, you), serverNow: now(), you, chat: store.chatFor(gameId, you), bots: store.botsOf(gameId),
+    };
   }
 
   function stream(gameId: string, token: string | null, req: IncomingMessage, res: ServerResponse): void {
@@ -93,7 +107,7 @@ export function createApp(store: GameStore, rootDir: string, now: () => number =
     });
     // Resolve the token on every send: it stops matching once the player leaves the lobby.
     const send = (s: typeof state) =>
-      res.write(`event: state\ndata: ${JSON.stringify(message(s, store.playerForToken(gameId, token)))}\n\n`);
+      res.write(`event: state\ndata: ${JSON.stringify(message(gameId, s, store.playerForToken(gameId, token)))}\n\n`);
     send(state);
     const unsubscribe = store.subscribe(gameId, send);
     const heartbeat = setInterval(() => res.write(": ping\n\n"), HEARTBEAT_MS);
@@ -105,6 +119,12 @@ export function createApp(store: GameStore, rootDir: string, now: () => number =
 }
 
 // --- helpers ---------------------------------------------------------------------------------
+
+/** Reply { ok: true } or the error — for commands whose result arrives over the event stream. */
+function done(res: ServerResponse, r: Outcome<unknown>): void {
+  if (r.ok) sendJson(res, 200, { ok: true });
+  else sendJson(res, r.status, { error: r.error });
+}
 
 function reply<T>(res: ServerResponse, r: Outcome<T> | { ok: true; value: T }): void {
   if (r.ok) sendJson(res, 200, r.value);

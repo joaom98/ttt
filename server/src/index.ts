@@ -17,7 +17,10 @@ const dataDir = resolve(rootDir, process.env.DATA_DIR ?? "data");
 
 const store = new GameStore({ dataDir });
 const server = createApp(store, rootDir);
-const ticker = setInterval(() => store.runDueTicks(), 1000);
+const ticker = setInterval(() => {
+  store.runDueTicks();
+  store.runBots();
+}, 1000);
 
 server.listen(port, host, () => {
   console.log(`Tank Turn Tactics running at http://localhost:${port}`);
