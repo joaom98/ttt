@@ -1,4 +1,4 @@
-import type { GameState } from "./types.ts";
+import type { Action, GameState } from "./types.ts";
 
 /**
  * What a given player is allowed to see. Everything on the board is public (that's the game!),
@@ -35,6 +35,13 @@ export interface StateMessage {
   chat: ChatMessage[];
   /** Which players are server-controlled bots, and how they play. */
   bots: Record<string, BotPersonality>;
+  /** The action behind this update, so clients can animate it. Null for chat, lobby changes, etc. */
+  cause: Action | null;
+}
+
+/** The action behind an update as everyone may see it: jury votes stay secret. */
+export function publicCause(cause: Action | null): Action | null {
+  return cause && cause.type !== "juryVote" ? cause : null;
 }
 
 /** Chat lines a given player is allowed to read. */

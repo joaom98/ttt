@@ -12,8 +12,8 @@
 //   GET  /api/games/:id/events?token=  text/event-stream of StateMessage
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { GameConfig, GameState, PlayerAction } from "../../shared/src/types.ts";
-import { viewFor, type StateMessage } from "../../shared/src/view.ts";
+import type { Action, GameConfig, GameState, PlayerAction } from "../../shared/src/types.ts";
+import { publicCause, viewFor, type StateMessage } from "../../shared/src/view.ts";
 import { serveStatic } from "./static.ts";
 import { isPersonality, type GameStore, type Outcome } from "./store.ts";
 
@@ -90,9 +90,14 @@ export function createApp(store: GameStore, rootDir: string, now: () => number =
     sendJson(res, 404, { error: "Not found." });
   }
 
-  function message(gameId: string, state: GameState, you: string | null): StateMessage {
+  function message(gameId: string, state: GameState, you: string | null, cause: Action | null = null): StateMessage {
     return {
-      state: viewFor(state, you), serverNow: now(), you, chat: store.chatFor(gameId, you), bots: store.botsOf(gameId),
+      state: viewFor(state, you),
+      serverNow: now(),
+      you,
+      chat: store.chatFor(gameId, you),
+      bots: store.botsOf(gameId),
+      cause: publicCause(cause),
     };
   }
 
@@ -106,8 +111,8 @@ export function createApp(store: GameStore, rootDir: string, now: () => number =
       "x-accel-buffering": "no", // keep reverse proxies from buffering the stream
     });
     // Resolve the token on every send: it stops matching once the player leaves the lobby.
-    const send = (s: typeof state) =>
-      res.write(`event: state\ndata: ${JSON.stringify(message(gameId, s, store.playerForToken(gameId, token)))}\n\n`);
+    const send = (s: GameState, cause: Action | null = null) =>
+      res.write(`event: state\ndata: ${JSON.stringify(message(gameId, s, store.playerForToken(gameId, token), cause))}\n\n`);
     send(state);
     const unsubscribe = store.subscribe(gameId, send);
     const heartbeat = setInterval(() => res.write(": ping\n\n"), HEARTBEAT_MS);

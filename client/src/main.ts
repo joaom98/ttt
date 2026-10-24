@@ -8,6 +8,7 @@ import { canApply, distance, juryTally, livingTanks, tankAt } from "../../shared
 import type { GameConfig, GameState, PlayerAction, Tank } from "../../shared/src/types.ts";
 import { BOT_PERSONALITIES, type BotPersonality, type ChatMessage, type StateMessage } from "../../shared/src/view.ts";
 import { api, clearSession, lastName, loadSession, rememberName, saveSession, subscribe, type Session } from "./api.ts";
+import { animateChange } from "./fx.ts";
 
 const BOT_LABELS: Record<BotPersonality, string> = {
   hunter: "Hunter — chases and shoots the weakest tank",
@@ -166,6 +167,7 @@ function connect(): void {
     ui.gameId,
     ui.session?.token ?? null,
     (m) => {
+      const prev = ui.msg?.state;
       ui.msg = m;
       ui.clockOffset = m.serverNow - Date.now();
       // Our saved session no longer matches a player (e.g. we left) — forget it.
@@ -174,6 +176,7 @@ function connect(): void {
         ui.session = null;
       }
       renderGame();
+      animateChange(prev, m.state, m.cause, app);
     },
     (connected) => {
       ui.connected = connected;
@@ -195,6 +198,7 @@ function renderGame(): void {
   const restore = preserveInputs();
   app.innerHTML = s.phase === "lobby" ? lobbyView(s) : boardView(s);
   restore();
+  placePopover();
   updateCountdown();
 }
 
@@ -299,25 +303,112 @@ function boardView(s: GameState): string {
           ? `<div class="banner dead">Your tank was destroyed. Click a living tank to cast your jury vote — ${s.config.juryVotesNeeded}+ votes on one tank earns it a bonus AP at the next tick.</div>`
           : "";
 
+  const hint = mine?.alive && s.phase === "playing"
+    ? "Click your tank to upgrade, another tank to shoot or trade. Move by clicking a green square or with Q W E / A D / Z X C."
+    : "";
+
   return `
     <nav class="top"><a href="/" data-link>← Home</a><span class="muted">Game <b>${s.id}</b> · tick ${s.tick}</span></nav>
     ${banner}
     <div class="game">
-      <section class="board-wrap">
-        <div class="board" style="--w:${width}; --h:${height}">${cells}</div>
-        <p class="muted small hint">${mine?.alive ? "Click a green square to move (or use Q W E / A D / Z X C). Click a tank to target it." : ""}</p>
+      <section class="play">
+        ${hud(s, mine)}
+        <div class="board-wrap"><div class="board" style="--w:${width}; --h:${height}">${cells}</div></div>
+        ${roster(s, mine)}
+        <p class="muted small hint">${hint}</p>
       </section>
       <aside class="side">
-        ${s.phase === "playing" ? `<div class="card tick"><span class="muted small">Next AP in</span><span id="countdown">–</span>
-          ${s.config.debug && mine?.id === s.hostId ? `<button class="small" data-act="force-tick">Force tick</button>` : ""}</div>` : ""}
-        ${mine ? myPanel(s, mine) : ""}
-        ${target ? targetPanel(s, mine, target) : ""}
-        ${playersPanel(s, mine)}
         ${chatPanel(s, mine)}
         ${logPanel(s)}
       </aside>
-    </div>`;
+    </div>
+    ${target ? `<div id="popover" class="popover" role="dialog" aria-label="${esc(target.name)}" style="--c:${target.color}">${popover(s, mine, target)}</div>` : ""}`;
 }
+
+/** Your own stats and the tick clock, in one bar above the board. */
+function hud(s: GameState, mine: Tank | undefined): string {
+  const stats = mine
+    ? `<button class="hud-me" data-tank="${mine.id}" style="--c:${mine.color}" title="Open your tank's actions">
+        <span class="swatch"></span>${esc(mine.name)}</button>
+      <span class="stat" title="Hearts">♥ <b>${mine.hearts}</b></span>
+      <span class="stat" title="Action points">⚡ <b>${mine.ap}</b> AP</span>
+      <span class="stat" title="Range">◎ <b>${mine.range}</b> range</span>`
+    : `<span class="muted">Spectating</span>`;
+  const clock = s.phase === "playing"
+    ? `<span class="clock"><span class="muted small">Next AP in</span> <b id="countdown">–</b>
+        ${s.config.debug && mine?.id === s.hostId ? `<button class="small" data-act="force-tick">Force tick</button>` : ""}</span>`
+    : "";
+  return `<div class="hud">${stats}${clock}</div>`;
+}
+
+/** Every tank at a glance; click one to open its menu. */
+function roster(s: GameState, mine: Tank | undefined): string {
+  const tally = juryTally(s);
+  const bots = ui.msg?.bots ?? {};
+  const chips = s.order
+    .map((id) => s.tanks[id]!)
+    .sort((a, b) => Number(b.alive) - Number(a.alive))
+    .map((t) => `
+      <button class="tank-chip ${t.alive ? "" : "dead"} ${t.id === ui.targetId ? "targeted" : ""}" data-tank="${t.id}" style="--c:${t.color}"
+        title="${esc(tankTitle(t))}">
+        <span class="swatch"></span>${esc(t.name)}${t.id === mine?.id ? " (you)" : ""}${bots[t.id] ? " 🤖" : ""}
+        <span class="muted">${t.alive ? `♥${t.hearts} ⚡${t.ap} ◎${t.range}` : "destroyed"}</span>${tally[t.id] ? " 🗳️" : ""}
+      </button>`)
+    .join("");
+  return `<div class="roster" aria-label="${livingTanks(s).length} tanks alive">${chips}</div>`;
+}
+
+/** The menu that opens over a clicked tank: what you can do to (or with) it right now. */
+function popover(s: GameState, mine: Tank | undefined, t: Tank): string {
+  const isMe = t.id === mine?.id;
+  const dist = mine && !isMe ? distance(mine, t) : null;
+  const bot = ui.msg?.bots[t.id];
+  let actions = "";
+  if (mine && s.phase === "playing") {
+    if (isMe && mine.alive) {
+      const upgrade: PlayerAction = { type: "upgradeRange", playerId: mine.id };
+      actions = `<div class="actions"><button class="primary" data-act="upgrade" ${canApply(s, upgrade) ? "" : "disabled"}>⬆ Upgrade range (${s.config.upgradeRangeCost} AP)</button></div>`;
+    } else if (isMe && s.juryVotes[mine.id]) {
+      actions = `<p class="small">Your jury vote: <b>${esc(s.tanks[s.juryVotes[mine.id]!]?.name ?? "?")}</b></p>`;
+    } else if (!isMe && mine.alive) {
+      const shoot: PlayerAction = { type: "shoot", playerId: mine.id, targetId: t.id };
+      const ap: PlayerAction = { type: "giveAP", playerId: mine.id, targetId: t.id };
+      const heart: PlayerAction = { type: "giveHeart", playerId: mine.id, targetId: t.id };
+      actions = `
+        <div class="actions">
+          ${t.alive ? `<button class="danger" data-act="shoot" ${canApply(s, shoot) ? "" : "disabled"}>💥 Shoot (1 AP)</button>` : ""}
+          ${t.alive ? `<button data-act="giveAP" ${canApply(s, ap) ? "" : "disabled"}>⚡ Give 1 AP</button>` : ""}
+          ${s.config.allowGiveHeart ? `<button data-act="giveHeart" ${canApply(s, heart) ? "" : "disabled"}>♥ ${t.alive ? "Give a heart" : "Revive with a heart"}</button>` : ""}
+        </div>
+        ${dist !== null && dist > mine.range ? `<p class="muted small">Out of range: ${dist} away, your range is ${mine.range}.</p>` : ""}`;
+    } else if (!isMe && t.alive) {
+      const voted = s.juryVotes[mine.id] === t.id;
+      actions = `<div class="actions"><button data-act="vote" ${voted ? "disabled" : ""}>${voted ? "Voted ✓" : "🗳️ Jury vote for this tank"}</button></div>`;
+    }
+  }
+  return `
+    <div class="pop-head"><span class="swatch"></span><b>${esc(t.name)}</b>${isMe ? ` <span class="muted small">(you)</span>` : ""}
+      ${bot ? `<span class="badge">🤖 ${bot}</span>` : ""}${t.alive ? "" : `<span class="badge">destroyed</span>`}
+      <button class="link small" data-act="untarget" aria-label="Close">✕</button></div>
+    <div class="pop-stats">♥ ${t.hearts} · ⚡ ${t.ap} AP · ◎ range ${t.range}${dist !== null ? ` · ${dist} away` : ""}</div>
+    ${actions}
+    ${mine && !isMe && !bot ? `<button class="small dm" data-act="dm">✉️ Message privately</button>` : ""}`;
+}
+
+/** Pin the tank menu just above its tank (or below, near the top of the screen), inside the viewport. */
+function placePopover(): void {
+  const pop = document.getElementById("popover");
+  const cell = ui.targetId ? app.querySelector<HTMLElement>(`.cell[data-tank="${ui.targetId}"]`) : null;
+  if (!pop || !cell) return;
+  const r = cell.getBoundingClientRect();
+  const { width, height } = pop.getBoundingClientRect();
+  const margin = 8;
+  const above = r.top - height - margin;
+  pop.style.top = `${above >= margin ? above : r.bottom + margin}px`;
+  pop.style.left = `${Math.min(Math.max(margin, r.left + r.width / 2 - width / 2), innerWidth - width - margin)}px`;
+}
+addEventListener("resize", placePopover);
+addEventListener("scroll", placePopover, true);
 
 function cellHtml(s: GameState, mine: Tank | undefined, x: number, y: number): string {
   const t = tankAt(s, { x, y });
@@ -341,78 +432,6 @@ function cellHtml(s: GameState, mine: Tank | undefined, x: number, y: number): s
       </div>`
     : "";
   return `<div class="${cls.join(" ")}" ${data}>${inner}</div>`;
-}
-
-function myPanel(s: GameState, mine: Tank): string {
-  const upgrade: PlayerAction = { type: "upgradeRange", playerId: mine.id };
-  return `
-    <div class="card me" style="--c:${mine.color}">
-      <h3><span class="swatch"></span>${esc(mine.name)} <span class="muted small">(you)</span></h3>
-      <div class="stats">
-        <div><b>${mine.hearts}</b><span>hearts</span></div>
-        <div><b>${mine.ap}</b><span>AP</span></div>
-        <div><b>${mine.range}</b><span>range</span></div>
-      </div>
-      ${mine.alive && s.phase === "playing"
-        ? `<button data-act="upgrade" ${canApply(s, upgrade) ? "" : "disabled"}>Upgrade range (${s.config.upgradeRangeCost} AP)</button>`
-        : ""}
-      ${!mine.alive && s.juryVotes[mine.id] ? `<p class="small">Your jury vote: <b>${esc(s.tanks[s.juryVotes[mine.id]!]?.name ?? "?")}</b></p>` : ""}
-    </div>`;
-}
-
-function targetPanel(s: GameState, mine: Tank | undefined, t: Tank): string {
-  const dist = mine ? distance(mine, t) : null;
-  let buttons = "";
-  if (mine && s.phase === "playing" && t.id !== mine.id) {
-    if (mine.alive) {
-      const shoot: PlayerAction = { type: "shoot", playerId: mine.id, targetId: t.id };
-      const ap: PlayerAction = { type: "giveAP", playerId: mine.id, targetId: t.id };
-      const heart: PlayerAction = { type: "giveHeart", playerId: mine.id, targetId: t.id };
-      buttons = `
-        <div class="actions">
-          <button class="danger" data-act="shoot" ${canApply(s, shoot) ? "" : "disabled"}>💥 Shoot (1 AP)</button>
-          <button data-act="giveAP" ${canApply(s, ap) ? "" : "disabled"}>Give 1 AP</button>
-          ${s.config.allowGiveHeart ? `<button data-act="giveHeart" ${canApply(s, heart) ? "" : "disabled"}>${t.alive ? "Give a heart" : "Revive with a heart"}</button>` : ""}
-        </div>
-        ${dist !== null && dist > mine.range ? `<p class="muted small">Out of range (${dist} away, your range is ${mine.range}).</p>` : ""}`;
-    } else if (t.alive) {
-      const voted = s.juryVotes[mine.id] === t.id;
-      buttons = `<button data-act="vote" ${voted ? "disabled" : ""}>${voted ? "Voted ✓" : "Vote for this tank"}</button>`;
-    }
-  }
-  return `
-    <div class="card target" style="--c:${t.color}">
-      <h3><span class="swatch"></span>${esc(t.name)} ${t.alive ? "" : `<span class="badge">destroyed</span>`}
-        <button class="link small" data-act="untarget" aria-label="Close">✕</button></h3>
-      <div class="stats">
-        <div><b>${t.hearts}</b><span>hearts</span></div>
-        <div><b>${t.ap}</b><span>AP</span></div>
-        <div><b>${t.range}</b><span>range</span></div>
-        ${dist !== null ? `<div><b>${dist}</b><span>away</span></div>` : ""}
-      </div>
-      ${buttons}
-      ${mine && t.id !== mine.id && !ui.msg?.bots[t.id] ? `<button class="small dm" data-act="dm">✉️ Message privately</button>` : ""}
-    </div>`;
-}
-
-function playersPanel(s: GameState, mine: Tank | undefined): string {
-  const alive = livingTanks(s).length;
-  const tally = juryTally(s);
-  const rows = s.order
-    .map((id) => s.tanks[id]!)
-    .sort((a, b) => Number(b.alive) - Number(a.alive))
-    .map((t) => `
-      <tr class="${t.alive ? "" : "dead"} ${t.id === ui.targetId ? "targeted" : ""}" data-tank="${t.id}">
-        <td><span class="swatch" style="--c:${t.color}"></span>${esc(t.name)}${t.id === mine?.id ? " (you)" : ""}${ui.msg?.bots[t.id] ? ` <span title="Bot">🤖</span>` : ""}</td>
-        <td>${t.alive ? t.hearts : "✖"}</td><td>${t.ap}</td><td>${t.range}</td>
-        <td>${tally[t.id] ? "🗳️" : ""}</td>
-      </tr>`)
-    .join("");
-  return `
-    <div class="card">
-      <h3>Tanks <span class="muted small">${alive} alive</span></h3>
-      <table class="tanks"><thead><tr><th></th><th>♥</th><th>AP</th><th>Rng</th><th></th></tr></thead><tbody>${rows}</tbody></table>
-    </div>`;
 }
 
 function logPanel(s: GameState): string {
@@ -470,9 +489,10 @@ app.addEventListener("click", (e) => {
   if (button) return void onButton(button.dataset.act!, button);
   const cell = el.closest<HTMLElement>(".cell");
   if (cell) return onCell(Number(cell.dataset.x), Number(cell.dataset.y), cell.dataset.tank);
-  const row = el.closest<HTMLElement>("tr[data-tank]");
-  if (row) {
-    ui.targetId = row.dataset.tank ?? null;
+  // Tank chips under the board and your name in the bar open the same menu as the tank itself.
+  const chip = el.closest<HTMLElement>("button[data-tank]");
+  if (chip) {
+    ui.targetId = ui.targetId === chip.dataset.tank ? null : (chip.dataset.tank ?? null);
     renderGame();
   }
 });
@@ -536,7 +556,7 @@ function onCell(x: number, y: number, tankId: string | undefined): void {
   if (!s || s.phase === "lobby") return;
   const mine = me(s);
   if (tankId) {
-    ui.targetId = ui.targetId === tankId || tankId === mine?.id ? null : tankId;
+    ui.targetId = ui.targetId === tankId ? null : tankId;
     renderGame();
     return;
   }

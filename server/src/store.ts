@@ -6,7 +6,7 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFile
 import { join } from "node:path";
 import { MAX_PLAYERS, PRESETS } from "../../shared/src/config.ts";
 import { applyAction, createGame } from "../../shared/src/rules.ts";
-import type { GameConfig, GameState, PlayerAction } from "../../shared/src/types.ts";
+import type { Action, GameConfig, GameState, PlayerAction } from "../../shared/src/types.ts";
 import { BOT_PERSONALITIES, chatFor, type BotPersonality, type ChatMessage, type LobbySummary } from "../../shared/src/view.ts";
 import { botName, chooseBotAction } from "./bots.ts";
 
@@ -25,7 +25,8 @@ const CHAT_COOLDOWN_MS = 400;
 /** Bots "think" for a random time in this range between actions, so they feel like players. */
 const BOT_THINK_MS = [1500, 4000] as const;
 
-type Listener = (state: GameState) => void;
+/** Called with the new state and the action that produced it (null for chat, joins, bots added…). */
+type Listener = (state: GameState, cause: Action | null) => void;
 
 export type Outcome<T> = { ok: true; value: T } | { ok: false; error: string; status: number };
 
@@ -194,7 +195,7 @@ export class GameStore {
       // The rules hand the host role to the next player in line — never let that be a bot.
       if (game.bots[game.state.hostId]) game.state = { ...game.state, hostId: humans[0]! };
     }
-    this.commit(game.state.id);
+    this.commit(game.state.id, stamped);
     return { ok: true, value: game.state };
   }
 
@@ -204,10 +205,11 @@ export class GameStore {
     if (!game) return fail("Game not found.", 404);
     if (game.tokens[token] !== game.state.hostId) return fail("Only the host can do that.", 403);
     if (!game.state.config.debug) return fail("Debug mode is off for this game.", 403);
-    const result = applyAction(game.state, { type: "tick", now: this.now() });
+    const tick: Action = { type: "tick", now: this.now() };
+    const result = applyAction(game.state, tick);
     if (!result.ok) return fail(result.error);
     game.state = result.state;
-    this.commit(game.state.id);
+    this.commit(game.state.id, tick);
     return { ok: true, value: game.state };
   }
 
@@ -217,10 +219,11 @@ export class GameStore {
     for (const game of this.games.values()) {
       if (game.state.phase !== "playing" || game.state.nextTickAt === null) continue;
       if (game.state.nextTickAt > now) continue;
-      const result = applyAction(game.state, { type: "tick", now });
+      const tick: Action = { type: "tick", now };
+      const result = applyAction(game.state, tick);
       if (result.ok) {
         game.state = result.state;
-        this.commit(game.state.id);
+        this.commit(game.state.id, tick);
       }
     }
   }
@@ -246,7 +249,7 @@ export class GameStore {
         const result = applyAction(game.state, action);
         if (!result.ok) continue;
         game.state = result.state;
-        this.commit(game.state.id);
+        this.commit(game.state.id, action);
         if (game.state.phase !== "playing") break;
       }
     }
@@ -262,11 +265,11 @@ export class GameStore {
 
   // --- internals -----------------------------------------------------------------------------
 
-  private commit(gameId: string): void {
+  private commit(gameId: string, cause: Action | null = null): void {
     const game = this.games.get(gameId);
     if (!game) return;
     this.save(game);
-    for (const listener of this.listeners.get(gameId) ?? []) listener(game.state);
+    for (const listener of this.listeners.get(gameId) ?? []) listener(game.state, cause);
   }
 
   private hostGame(gameId: string, token: string): Outcome<StoredGame> {
