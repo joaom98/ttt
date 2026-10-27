@@ -91,7 +91,7 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 details { margin: 4px 0 16px; }
 summary { cursor: pointer; color: var(--muted); margin-bottom: 8px; }
 .tweaks { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
-.tweaks label.check { grid-column: 1 / -1; margin-bottom: 6px; }
+.tweaks label.check, .tweaks label.wide { grid-column: 1 / -1; margin-bottom: 6px; }
 .lobbies { list-style: none; padding: 0; margin: 0; }
 .lobbies li { display: flex; justify-content: space-between; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
 
@@ -124,6 +124,22 @@ nav.top { display: flex; justify-content: space-between; margin-bottom: 12px; }
 .hud .stat b { font-size: 18px; }
 .hud-me { display: inline-flex; align-items: center; padding: 4px 10px; }
 .clock { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.clock.resolving { flex-wrap: wrap; font-size: 14px; }
+.clock.resolving .current { font-weight: 800; color: var(--accent); }
+
+/* Rounds mode: this round's order, the planned move's ghost tank, and order marks */
+.plan-bar {
+  flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding-top: 8px; border-top: 1px dashed var(--line);
+}
+.plan-bar.has-order b { color: var(--accent); }
+.cell.planned { background: color-mix(in srgb, var(--panel) 70%, var(--accent)); }
+.tank.ghost { opacity: 0.45; outline: 2px dashed var(--c); outline-offset: -2px; box-shadow: none; }
+.cell .order-mark {
+  position: absolute; top: -6px; right: -6px; z-index: 1;
+  font-size: max(10px, calc(var(--cell) * 0.24)); line-height: 1;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 2px 3px;
+}
 #countdown { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 3.5em; }
 
 /* Every tank, under the board */

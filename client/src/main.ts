@@ -3,9 +3,9 @@
 // The shared rules (canApply, distance…) decide what's highlighted and which buttons are enabled,
 // so the UI can never disagree with the server about what's legal.
 
-import { PRESETS } from "../../shared/src/config.ts";
+import { DEFAULT_PRESET, PRESETS } from "../../shared/src/config.ts";
 import { canApply, distance, juryTally, livingTanks, tankAt } from "../../shared/src/rules.ts";
-import type { GameConfig, GameState, PlayerAction, Tank } from "../../shared/src/types.ts";
+import type { GameConfig, GameState, OrderAction, PlayerAction, Tank } from "../../shared/src/types.ts";
 import { BOT_PERSONALITIES, type BotPersonality, type ChatMessage, type StateMessage } from "../../shared/src/view.ts";
 import { api, clearSession, lastName, loadSession, rememberName, saveSession, subscribe, type Session } from "./api.ts";
 import { animateChange } from "./fx.ts";
@@ -61,7 +61,7 @@ window.addEventListener("popstate", route);
 async function renderHome(): Promise<void> {
   document.title = "Tank Turn Tactics";
   const presetOptions = Object.entries(PRESETS)
-    .map(([key, p]) => `<option value="${key}" ${key === "quick" ? "selected" : ""}>${esc(p.label)}</option>`)
+    .map(([key, p]) => `<option value="${key}" ${key === DEFAULT_PRESET ? "selected" : ""}>${esc(p.label)}</option>`)
     .join("");
   app.innerHTML = `
     <header class="hero">
@@ -77,6 +77,12 @@ async function renderHome(): Promise<void> {
           <summary>Rule tweaks</summary>
           <p class="muted small">Leave blank to use the pace's defaults.</p>
           <div class="tweaks">
+            <label class="small wide">Timing
+              <select name="mode">
+                <option value="">The pace's default</option>
+                <option value="rounds">Rounds — plan in secret, resolve in random order</option>
+                <option value="realtime">Real time — act whenever you have AP</option>
+              </select></label>
             ${numberField("tickSeconds", "Seconds between ticks")}
             ${numberField("width", "Board size (blank = auto)")}
             ${numberField("startingHearts", "Starting hearts", 3)}
@@ -94,7 +100,7 @@ async function renderHome(): Promise<void> {
         </details>
         <div class="row">
           <button type="submit" class="primary">Create game</button>
-          <button type="button" data-act="practice" title="Start a Quick game right away against ${PRACTICE_BOTS.length} bots">Practice vs bots</button>
+          <button type="button" data-act="practice" title="Start a ${esc(PRESETS[DEFAULT_PRESET]!.label.split(" —")[0]!)} game right away against ${PRACTICE_BOTS.length} bots">Practice vs bots</button>
         </div>
       </form>
       <div class="card">
@@ -134,7 +140,9 @@ function checkField(name: string, label: string, def: boolean | null): string {
 
 function readTweaks(form: HTMLFormElement): Partial<GameConfig> {
   const data = new FormData(form);
-  const config: Record<string, number | boolean> = {};
+  const config: Record<string, number | boolean | string> = {};
+  const mode = String(data.get("mode") ?? "");
+  if (mode) config.mode = mode;
   for (const key of ["width", "startingHearts", "startingRange", "startingAP", "apPerTick", "upgradeRangeCost", "juryVotesNeeded", "heartsSpawnedPerTick"]) {
     const v = String(data.get(key) ?? "").trim();
     if (v !== "") config[key] = Number(v);
@@ -262,7 +270,7 @@ function lobbyView(s: GameState): string {
         ? `<div class="row add-bot"><select id="bot-kind" aria-label="Kind of bot">${botOptions}</select><button data-act="add-bot">Add bot</button></div>`
         : ""}
       <p class="muted small">
-        ${c.startingHearts} hearts · range ${c.startingRange} · ${c.startingAP} starting AP ·
+        <b>${c.mode === "rounds" ? "Planned rounds" : "Real time"}</b> · ${c.startingHearts} hearts · range ${c.startingRange} · ${c.startingAP} starting AP ·
         ${c.apPerTick} AP every ${fmtDuration(c.tickIntervalMs)} · range upgrade ${c.upgradeRangeCost} AP ·
         jury needs ${c.juryVotesNeeded} votes${c.heartsSpawnedPerTick ? ` · ${c.heartsSpawnedPerTick} heart(s) spawn per tick` : ""}
         ${c.debug ? " · <b>debug on</b>" : ""}
@@ -286,12 +294,13 @@ function boardView(s: GameState): string {
   const target = ui.targetId ? s.tanks[ui.targetId] : undefined;
   if (ui.targetId && !target) ui.targetId = null;
   const { width, height } = s.config;
+  const plan = planFor(s, mine);
 
   const cols = Array.from({ length: width }, (_, x) => `<div class="label">${colName(x)}</div>`).join("");
   let cells = `<div class="label"></div>${cols}`;
   for (let y = 0; y < height; y++) {
     cells += `<div class="label">${y + 1}</div>`;
-    for (let x = 0; x < width; x++) cells += cellHtml(s, mine, x, y);
+    for (let x = 0; x < width; x++) cells += cellHtml(s, mine, plan, x, y);
   }
 
   const banner =
@@ -303,16 +312,19 @@ function boardView(s: GameState): string {
           ? `<div class="banner dead">Your tank was destroyed. Click a living tank to cast your jury vote — ${s.config.juryVotesNeeded}+ votes on one tank earns it a bonus AP at the next tick.</div>`
           : "";
 
-  const hint = mine?.alive && s.phase === "playing"
-    ? "Click your tank to upgrade, another tank to shoot or trade. Move by clicking a green square or with Q W E / A D / Z X C."
-    : "";
+  const hint = !(mine?.alive && s.phase === "playing")
+    ? ""
+    : s.config.mode === "rounds"
+      ? "Each round, pick one order: click a green square (or Q W E / A D / Z X C) to move, or a tank to shoot or give. " +
+        "When the timer runs out, everyone's orders play out one player at a time, in a random order."
+      : "Click your tank to upgrade, another tank to shoot or trade. Move by clicking a green square or with Q W E / A D / Z X C.";
 
   return `
     <nav class="top"><a href="/" data-link>← Home</a><span class="muted">Game <b>${s.id}</b> · tick ${s.tick}</span></nav>
     ${banner}
     <div class="game">
       <section class="play">
-        ${hud(s, mine)}
+        ${hud(s, mine, plan)}
         <div class="board-wrap"><div class="board" style="--w:${width}; --h:${height}">${cells}</div></div>
         ${roster(s, mine)}
         <p class="muted small hint">${hint}</p>
@@ -322,11 +334,49 @@ function boardView(s: GameState): string {
         ${logPanel(s)}
       </aside>
     </div>
-    ${target ? `<div id="popover" class="popover" role="dialog" aria-label="${esc(target.name)}" style="--c:${target.color}">${popover(s, mine, target)}</div>` : ""}`;
+    ${target ? `<div id="popover" class="popover" role="dialog" aria-label="${esc(target.name)}" style="--c:${target.color}">${popover(s, mine, plan, target)}</div>` : ""}`;
 }
 
-/** Your own stats and the tick clock, in one bar above the board. */
-function hud(s: GameState, mine: Tank | undefined): string {
+/** Rounds mode while you plan: your one order for the round, and what to draw for it. */
+interface Plan {
+  planning: boolean;
+  order: OrderAction | undefined;
+  /** "x,y" of the square your planned move goes to. */
+  moveTo: string | null;
+  /** tank id -> icon for the order aimed at it (💥 ⚡ ♥ ⬆). */
+  marks: Map<string, string>;
+}
+
+const ORDER_ICONS = { move: "➜", shoot: "💥", giveAP: "⚡", giveHeart: "♥", upgradeRange: "⬆" } as const;
+
+function planFor(s: GameState, mine: Tank | undefined): Plan {
+  const planning = s.config.mode === "rounds" && s.phase === "playing" && !s.resolving && !!mine?.alive;
+  const order = planning && mine ? s.orders[mine.id] : undefined;
+  const plan: Plan = { planning, order, moveTo: null, marks: new Map() };
+  if (!order || !mine) return plan;
+  if (order.type === "move") plan.moveTo = `${mine.x + order.dx},${mine.y + order.dy}`;
+  else plan.marks.set(order.type === "upgradeRange" ? mine.id : order.targetId, ORDER_ICONS[order.type]);
+  return plan;
+}
+
+function describeOrder(s: GameState, o: OrderAction): string {
+  const name = (id: string) => esc(s.tanks[id]?.name ?? "?");
+  switch (o.type) {
+    case "move": return `${ORDER_ICONS.move} Move to ${colName(s.tanks[o.playerId]!.x + o.dx)}${s.tanks[o.playerId]!.y + o.dy + 1}`;
+    case "shoot": return `${ORDER_ICONS.shoot} Shoot ${name(o.targetId)}`;
+    case "giveAP": return `${ORDER_ICONS.giveAP} Give 1 AP to ${name(o.targetId)}`;
+    case "giveHeart": return `${ORDER_ICONS.giveHeart} Give a heart to ${name(o.targetId)}`;
+    case "upgradeRange": return `${ORDER_ICONS.upgradeRange} Upgrade range`;
+  }
+}
+
+/** In rounds mode a tank action becomes an order for the plan; otherwise it happens right away. */
+function intent(s: GameState, order: OrderAction): PlayerAction {
+  return s.config.mode === "rounds" ? { type: "order", playerId: order.playerId, order } : order;
+}
+
+/** Your own stats and the clock (and, in rounds mode, your plan), in one bar above the board. */
+function hud(s: GameState, mine: Tank | undefined, plan: Plan): string {
   const stats = mine
     ? `<button class="hud-me" data-tank="${mine.id}" style="--c:${mine.color}" title="Open your tank's actions">
         <span class="swatch"></span>${esc(mine.name)}</button>
@@ -334,53 +384,78 @@ function hud(s: GameState, mine: Tank | undefined): string {
       <span class="stat" title="Action points">⚡ <b>${mine.ap}</b> AP</span>
       <span class="stat" title="Range">◎ <b>${mine.range}</b> range</span>`
     : `<span class="muted">Spectating</span>`;
-  const clock = s.phase === "playing"
-    ? `<span class="clock"><span class="muted small">Next AP in</span> <b id="countdown">–</b>
-        ${s.config.debug && mine?.id === s.hostId ? `<button class="small" data-act="force-tick">Force tick</button>` : ""}</span>`
+  const host = s.config.debug && mine?.id === s.hostId;
+  let clock = "";
+  if (s.phase === "playing" && s.resolving) {
+    const current = s.resolving.done?.playerId;
+    const order = s.resolving.turnOrder
+      .map((id) => `<span class="${id === current ? "current" : ""}">${esc(s.tanks[id]?.name ?? "?")}</span>`)
+      .join(" → ");
+    clock = `<span class="clock resolving"><span class="muted small">Playing out</span> ${order}</span>`;
+  } else if (s.phase === "playing") {
+    const rounds = s.config.mode === "rounds";
+    clock = `<span class="clock"><span class="muted small">${rounds ? "Round ends in" : "Next AP in"}</span> <b id="countdown">–</b>
+      ${host ? `<button class="small" data-act="force-tick">${rounds ? "End round" : "Force tick"}</button>` : ""}</span>`;
+  }
+  const planBar = plan.planning && mine
+    ? `<div class="plan-bar ${plan.order ? "has-order" : ""}">
+        <span class="small muted">This round:</span>
+        ${plan.order
+          ? `<b class="small">${describeOrder(s, plan.order)}</b><button class="small" data-act="cancel">Cancel</button>`
+          : `<span class="small muted">no order yet — click a green square or a tank</span>`}
+      </div>`
     : "";
-  return `<div class="hud">${stats}${clock}</div>`;
+  return `<div class="hud">${stats}${clock}${planBar}</div>`;
 }
 
 /** Every tank at a glance; click one to open its menu. */
 function roster(s: GameState, mine: Tank | undefined): string {
   const tally = juryTally(s);
   const bots = ui.msg?.bots ?? {};
+  const turn = (id: string) => (s.phase === "playing" && s.resolving ? s.resolving.turnOrder.indexOf(id) : -1);
   const chips = s.order
     .map((id) => s.tanks[id]!)
     .sort((a, b) => Number(b.alive) - Number(a.alive))
-    .map((t) => `
+    .map((t) => {
+      const status = turn(t.id) >= 0 ? `<span class="badge" title="Turn order this round">#${turn(t.id) + 1}</span>` : "";
+      return `
       <button class="tank-chip ${t.alive ? "" : "dead"} ${t.id === ui.targetId ? "targeted" : ""}" data-tank="${t.id}" style="--c:${t.color}"
         title="${esc(tankTitle(t))}">
         <span class="swatch"></span>${esc(t.name)}${t.id === mine?.id ? " (you)" : ""}${bots[t.id] ? " 🤖" : ""}
-        <span class="muted">${t.alive ? `♥${t.hearts} ⚡${t.ap} ◎${t.range}` : "destroyed"}</span>${tally[t.id] ? " 🗳️" : ""}
-      </button>`)
+        <span class="muted">${t.alive ? `♥${t.hearts} ⚡${t.ap} ◎${t.range}` : "destroyed"}</span>${tally[t.id] ? " 🗳️" : ""}${status}
+      </button>`;
+    })
     .join("");
   return `<div class="roster" aria-label="${livingTanks(s).length} tanks alive">${chips}</div>`;
 }
 
 /** The menu that opens over a clicked tank: what you can do to (or with) it right now. */
-function popover(s: GameState, mine: Tank | undefined, t: Tank): string {
+function popover(s: GameState, mine: Tank | undefined, plan: Plan, t: Tank): string {
   const isMe = t.id === mine?.id;
   const dist = mine && !isMe ? distance(mine, t) : null;
   const bot = ui.msg?.bots[t.id];
+  const rounds = s.config.mode === "rounds";
   let actions = "";
   if (mine && s.phase === "playing") {
-    if (isMe && mine.alive) {
-      const upgrade: PlayerAction = { type: "upgradeRange", playerId: mine.id };
-      actions = `<div class="actions"><button class="primary" data-act="upgrade" ${canApply(s, upgrade) ? "" : "disabled"}>⬆ Upgrade range (${s.config.upgradeRangeCost} AP)</button></div>`;
+    if (rounds && s.resolving && mine.alive) {
+      actions = `<p class="muted small">This round is playing out — you can plan again in a moment.</p>`;
+    } else if (isMe && mine.alive) {
+      const upgrade = intent(s, { type: "upgradeRange", playerId: mine.id });
+      actions = `<div class="actions"><button class="primary" data-act="upgrade" ${canApply(s, upgrade) ? "" : "disabled"}>⬆ ${rounds ? "Plan: upgrade" : "Upgrade"} range (${s.config.upgradeRangeCost} AP)</button></div>`;
     } else if (isMe && s.juryVotes[mine.id]) {
       actions = `<p class="small">Your jury vote: <b>${esc(s.tanks[s.juryVotes[mine.id]!]?.name ?? "?")}</b></p>`;
     } else if (!isMe && mine.alive) {
-      const shoot: PlayerAction = { type: "shoot", playerId: mine.id, targetId: t.id };
-      const ap: PlayerAction = { type: "giveAP", playerId: mine.id, targetId: t.id };
-      const heart: PlayerAction = { type: "giveHeart", playerId: mine.id, targetId: t.id };
+      const shoot = intent(s, { type: "shoot", playerId: mine.id, targetId: t.id });
+      const ap = intent(s, { type: "giveAP", playerId: mine.id, targetId: t.id });
+      const heart = intent(s, { type: "giveHeart", playerId: mine.id, targetId: t.id });
       actions = `
         <div class="actions">
-          ${t.alive ? `<button class="danger" data-act="shoot" ${canApply(s, shoot) ? "" : "disabled"}>💥 Shoot (1 AP)</button>` : ""}
+          ${t.alive ? `<button class="danger" data-act="shoot" ${canApply(s, shoot) ? "" : "disabled"}>💥 ${rounds ? "Plan a shot" : "Shoot"} (1 AP)</button>` : ""}
           ${t.alive ? `<button data-act="giveAP" ${canApply(s, ap) ? "" : "disabled"}>⚡ Give 1 AP</button>` : ""}
           ${s.config.allowGiveHeart ? `<button data-act="giveHeart" ${canApply(s, heart) ? "" : "disabled"}>♥ ${t.alive ? "Give a heart" : "Revive with a heart"}</button>` : ""}
         </div>
-        ${dist !== null && dist > mine.range ? `<p class="muted small">Out of range: ${dist} away, your range is ${mine.range}.</p>` : ""}`;
+        ${dist !== null && dist > mine.range ? `<p class="muted small">Out of range: ${dist} away, your range is ${mine.range}.</p>` : ""}
+        ${plan.planning ? `<p class="muted small">This becomes your order for the round${plan.order ? ", replacing the current one" : ""}. It happens when the round ends — if ${esc(t.name)} is still in range by your turn.</p>` : ""}`;
     } else if (!isMe && t.alive) {
       const voted = s.juryVotes[mine.id] === t.id;
       actions = `<div class="actions"><button data-act="vote" ${voted ? "disabled" : ""}>${voted ? "Voted ✓" : "🗳️ Jury vote for this tank"}</button></div>`;
@@ -390,7 +465,8 @@ function popover(s: GameState, mine: Tank | undefined, t: Tank): string {
     <div class="pop-head"><span class="swatch"></span><b>${esc(t.name)}</b>${isMe ? ` <span class="muted small">(you)</span>` : ""}
       ${bot ? `<span class="badge">🤖 ${bot}</span>` : ""}${t.alive ? "" : `<span class="badge">destroyed</span>`}
       <button class="link small" data-act="untarget" aria-label="Close">✕</button></div>
-    <div class="pop-stats">♥ ${t.hearts} · ⚡ ${t.ap} AP · ◎ range ${t.range}${dist !== null ? ` · ${dist} away` : ""}</div>
+    <div class="pop-stats">♥ ${t.hearts} · ⚡ ${t.ap} AP · ◎ range ${t.range}${dist !== null ? ` · ${dist} away` : ""}
+      ${plan.order && plan.marks.get(t.id) ? `<br />Your order: ${describeOrder(s, plan.order)}` : ""}</div>
     ${actions}
     ${mine && !isMe && !bot ? `<button class="small dm" data-act="dm">✉️ Message privately</button>` : ""}`;
 }
@@ -410,27 +486,36 @@ function placePopover(): void {
 addEventListener("resize", placePopover);
 addEventListener("scroll", placePopover, true);
 
-function cellHtml(s: GameState, mine: Tank | undefined, x: number, y: number): string {
+function cellHtml(s: GameState, mine: Tank | undefined, plan: Plan, x: number, y: number): string {
   const t = tankAt(s, { x, y });
   const cls = ["cell"];
   let data = `data-x="${x}" data-y="${y}"`;
-  if (mine?.alive && s.phase === "playing") {
+  const canAct = mine?.alive && s.phase === "playing" && !(s.config.mode === "rounds" && s.resolving);
+  if (mine && canAct) {
     const d = distance(mine, { x, y });
     if (d <= mine.range) cls.push("in-range");
-    if (d === 1 && !t && canApply(s, move(mine, x, y))) cls.push("can-move");
+    if (d === 1 && !t && canApply(s, intent(s, move(mine, x, y)))) cls.push("can-move");
   }
   if (s.pickups.some((p) => p.x === x && p.y === y)) cls.push("pickup");
+  const planned = plan.moveTo === `${x},${y}`;
+  if (planned) cls.push("planned");
   if (t) {
     cls.push("has-tank");
     if (t.id === ui.targetId) cls.push("targeted");
     data += ` data-tank="${t.id}"`;
   }
-  const inner = t
+  let inner = t
     ? `<div class="tank ${t.alive ? "" : "wreck"} ${t.id === mine?.id ? "mine" : ""}" style="--c:${t.color}" title="${esc(tankTitle(t))}">
         <span class="initials">${esc(initials(t.name))}</span>
         <span class="hp">${t.alive ? "♥".repeat(Math.min(t.hearts, 5)) + (t.hearts > 5 ? "+" : "") : "✖"}</span>
       </div>`
     : "";
+  // Where your planned move takes you: a see-through "ghost" of your tank.
+  if (planned && mine && !t) {
+    inner = `<div class="tank ghost" style="--c:${mine.color}" title="Your planned move"><span class="initials">${esc(initials(mine.name))}</span></div>`;
+  }
+  const mark = t ? plan.marks.get(t.id) : undefined;
+  if (mark) inner += `<span class="order-mark" title="Your order for this round">${mark}</span>`;
   return `<div class="${cls.join(" ")}" ${data}>${inner}</div>`;
 }
 
@@ -548,7 +633,7 @@ document.addEventListener("keydown", (e) => {
   const dir = KEY_DIRS[e.key];
   if (!dir || !mine?.alive || s?.phase !== "playing") return;
   e.preventDefault();
-  void send({ type: "move", playerId: mine.id, dx: dir[0], dy: dir[1] });
+  void send(intent(s, { type: "move", playerId: mine.id, dx: dir[0], dy: dir[1] }));
 });
 
 function onCell(x: number, y: number, tankId: string | undefined): void {
@@ -561,7 +646,7 @@ function onCell(x: number, y: number, tankId: string | undefined): void {
     return;
   }
   if (mine?.alive && distance(mine, { x, y }) === 1) {
-    void send(move(mine, x, y));
+    void send(intent(s, move(mine, x, y)));
     return;
   }
   if (ui.targetId) {
@@ -610,20 +695,22 @@ async function onButton(act: string, button: HTMLButtonElement): Promise<void> {
       if (ui.session) await guard(() => api.forceTick(ui.session!));
       return;
   }
-  if (!mine) return;
+  if (!mine || !s) return;
   const id = mine.id;
   const actions: Record<string, PlayerAction> = {
     start: { type: "start", playerId: id, now: 0 },
     leave: { type: "leave", playerId: id },
-    upgrade: { type: "upgradeRange", playerId: id },
-    shoot: { type: "shoot", playerId: id, targetId: target },
-    giveAP: { type: "giveAP", playerId: id, targetId: target },
-    giveHeart: { type: "giveHeart", playerId: id, targetId: target },
+    upgrade: intent(s, { type: "upgradeRange", playerId: id }),
+    shoot: intent(s, { type: "shoot", playerId: id, targetId: target }),
+    giveAP: intent(s, { type: "giveAP", playerId: id, targetId: target }),
+    giveHeart: intent(s, { type: "giveHeart", playerId: id, targetId: target }),
     vote: { type: "juryVote", playerId: id, targetId: target },
+    cancel: { type: "cancelOrder", playerId: id },
   };
   const action = actions[act];
   if (!action) return;
-  if (act === "shoot" && s && !confirmShoot(s, target)) return;
+  // Planning a shot isn't final, so only ask before a real-time killing blow.
+  if (act === "shoot" && s.config.mode !== "rounds" && !confirmShoot(s, target)) return;
   const sent = await send(action);
   if (sent && act === "leave" && ui.session) {
     clearSession(ui.session.gameId);
@@ -638,7 +725,7 @@ async function startPractice(form: HTMLFormElement | null): Promise<void> {
   const name = String(new FormData(form).get("name")).trim();
   rememberName(name);
   await guard(async () => {
-    const r = await api.create(name, "quick", {}, PRACTICE_BOTS);
+    const r = await api.create(name, DEFAULT_PRESET, {}, PRACTICE_BOTS);
     const session = { gameId: r.gameId, playerId: r.playerId, token: r.token };
     saveSession(session);
     await api.act(session, { type: "start", playerId: r.playerId, now: 0 });
@@ -674,8 +761,8 @@ async function guard(fn: () => Promise<unknown>): Promise<boolean> {
 // ---------------------------------------------------------------------------------------------
 // Little helpers
 
-function move(mine: Tank, x: number, y: number): PlayerAction {
-  return { type: "move", playerId: mine.id, dx: x - mine.x, dy: y - mine.y };
+function move(from: Tank, x: number, y: number): OrderAction {
+  return { type: "move", playerId: from.id, dx: x - from.x, dy: y - from.y };
 }
 
 function updateCountdown(): void {

@@ -35,6 +35,24 @@ These are the rules the code implements today, based on the original Halfbrick p
   receives *3 or more* votes gets a bonus AP at the next tick. Votes are secret and reset every tick.
 - *Giving a heart to a destroyed tank revives it* with 1 heart and 0 AP.
 
+## Timing: real time or rounds
+
+Each game uses one of two timing modes (*real time* by default; the **Rounds** pace uses rounds).
+
+- **Real time:** spend AP whenever you like; actions happen the moment you click.
+- **Rounds:** every tick (*10 seconds* in the Rounds pace) is a round. During it you plan **one order** —
+  a move, a shot, a gift or an upgrade — checked against the board as it is. Picking another order replaces
+  it, and you can cancel it. Orders are **secret** until they play out. When the timer runs out:
+  1. The tanks that planned something are put in a **random order**, announced in the event log. Tanks
+     that planned nothing simply sit the round out.
+  2. One tank at a time, in that order, carries out its order.
+  3. An order that no longer works when its turn comes (the target moved out of range or was destroyed,
+     the square was taken…) is **skipped and costs nothing**.
+  4. Then the tick happens: AP income, the jury's bonus and heart spawns, and the next round starts.
+
+  A tank destroyed earlier in the round doesn't get to act, so going first can decide a duel. Chat stays
+  live the whole time.
+
 ## Optional rules
 
 - *Heart pickups:* a number of hearts can appear on empty squares each tick (*0 by default*). Drive onto
