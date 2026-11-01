@@ -353,6 +353,42 @@ describe("rounds mode", () => {
   });
 });
 
+describe("rematch", () => {
+  const finished = () => ok(board([{ x: 0, y: 0, ap: 3 }, { x: 1, y: 1, hearts: 1 }]), { type: "shoot", playerId: "p0", targetId: "p1" });
+
+  it("puts everyone back in the lobby with fresh tanks, keeping players and rules", () => {
+    const s = ok(finished(), { type: "rematch", playerId: "p0" });
+    assert.equal(s.phase, "lobby");
+    assert.equal(s.winnerId, null);
+    assert.equal(s.tick, 0);
+    assert.deepEqual(s.order, ["p0", "p1"]);
+    assert.ok(Object.values(s.tanks).every((t) => t.alive && t.ap === 0 && t.x === -1));
+    assert.equal(s.config.width, 10, "a board size chosen by hand is kept");
+    const again = ok(s, { type: "start", playerId: "p0", now: 5000 });
+    assert.equal(again.phase, "playing");
+    assert.ok(Object.values(again.tanks).every((t) => t.hearts === 3 && t.x >= 0));
+  });
+
+  it("lets new players join before the rematch, and re-sizes an automatic board", () => {
+    let s = ok(lobby(["Ana", "Bia"]), { type: "start", playerId: "p0", now: 0 });
+    assert.equal(s.config.width, 8);
+    s.tanks.p1!.hearts = 1;
+    s.tanks.p0!.ap = 1;
+    Object.assign(s.tanks.p1!, { x: s.tanks.p0!.x === 0 ? 1 : s.tanks.p0!.x - 1, y: s.tanks.p0!.y });
+    s = ok(s, { type: "shoot", playerId: "p0", targetId: "p1" });
+    s = ok(s, { type: "rematch", playerId: "p0" });
+    assert.equal(s.config.width, 0);
+    for (let i = 2; i < 6; i++) s = ok(s, { type: "join", playerId: `p${i}`, name: `New${i}` });
+    s = ok(s, { type: "start", playerId: "p0", now: 0 });
+    assert.equal(s.config.width, 10, "sized for six tanks now");
+  });
+
+  it("is only for the host, once the game is over", () => {
+    assert.match(err(finished(), { type: "rematch", playerId: "p1" }), /host/);
+    assert.match(err(board([{ x: 0, y: 0 }, { x: 5, y: 5 }]), { type: "rematch", playerId: "p0" }), /isn't over/);
+  });
+});
+
 describe("purity", () => {
   it("never mutates the input state", () => {
     const s = board([{ x: 0, y: 0, ap: 1 }, { x: 1, y: 1 }]);

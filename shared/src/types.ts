@@ -83,6 +83,8 @@ export interface GameState {
   /** Rounds mode: the round being played out, step by step. Null while planning. */
   resolving: Resolution | null;
   winnerId: string | null;
+  /** The board size was picked from the player count at the start, so a rematch picks it again. */
+  autoSize: boolean;
   /** Seeded RNG state so the reducer stays pure and replayable. */
   rng: number;
   log: LogEntry[];
@@ -112,6 +114,7 @@ export type Action =
   | { type: "join"; playerId: string; name: string }
   | { type: "leave"; playerId: string }
   | { type: "start"; playerId: string; now: number }
+  | { type: "rematch"; playerId: string }
   | OrderAction
   | { type: "juryVote"; playerId: string; targetId: string }
   | { type: "order"; playerId: string; order: OrderAction }

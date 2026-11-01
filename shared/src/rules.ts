@@ -33,6 +33,7 @@ export function createGame(opts: CreateGameOptions): Result {
     orders: {},
     resolving: null,
     winnerId: null,
+    autoSize: false,
     rng: opts.seed | 0,
     log: [],
     createdAt: opts.now,
@@ -142,6 +143,7 @@ export function applyAction(prev: GameState, action: Action): Result {
     if (action.playerId !== s.hostId) return fail("Only the host can start the game.");
     if (s.order.length < MIN_PLAYERS) return fail(`Need at least ${MIN_PLAYERS} players.`);
     const side = autoBoardSide(s.order.length);
+    s.autoSize = s.config.width === 0 || s.config.height === 0;
     if (s.config.width === 0) s.config.width = side;
     if (s.config.height === 0) s.config.height = side;
     const spots = placeTanks(s.config.width, s.config.height, s.order.length, rng);
@@ -163,6 +165,28 @@ export function applyAction(prev: GameState, action: Action): Result {
     s.resolving = null;
     s.rng = rng.seed;
     log(`The game has started with ${s.order.length} tanks!`, action.now);
+    return ok();
+  }
+
+  if (action.type === "rematch") {
+    if (s.phase !== "finished") return fail("The game isn't over yet.");
+    if (action.playerId !== s.hostId) return fail("Only the host can start a rematch.");
+    // Same players, colours and rules; everything about the last match is wiped. Players can
+    // still join or leave in the lobby before the host starts again.
+    if (s.autoSize) {
+      s.config.width = 0;
+      s.config.height = 0;
+    }
+    for (const t of Object.values(s.tanks)) Object.assign(t, { x: -1, y: -1, hearts: 0, range: 0, ap: 0, alive: true });
+    s.phase = "lobby";
+    s.pickups = [];
+    s.tick = 0;
+    s.nextTickAt = null;
+    s.juryVotes = {};
+    s.orders = {};
+    s.resolving = null;
+    s.winnerId = null;
+    log("Rematch! Everyone is back in the lobby.");
     return ok();
   }
 

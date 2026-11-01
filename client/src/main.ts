@@ -305,7 +305,10 @@ function boardView(s: GameState): string {
 
   const banner =
     s.phase === "finished"
-      ? `<div class="banner win">🏆 ${s.winnerId ? `${esc(s.tanks[s.winnerId]!.name)} wins!` : "Nobody survived."}</div>`
+      ? `<div class="banner win">🏆 ${s.winnerId ? `${esc(s.tanks[s.winnerId]!.name)} wins!` : "Nobody survived."}
+          ${mine?.id === s.hostId
+            ? `<button class="primary" data-act="rematch">Play again</button>`
+            : mine ? `<span class="muted small">Waiting for the host to start a rematch…</span>` : ""}</div>`
       : !mine
         ? `<div class="banner">You're spectating.</div>`
         : !mine.alive
@@ -706,11 +709,10 @@ async function onButton(act: string, button: HTMLButtonElement): Promise<void> {
     giveHeart: intent(s, { type: "giveHeart", playerId: id, targetId: target }),
     vote: { type: "juryVote", playerId: id, targetId: target },
     cancel: { type: "cancelOrder", playerId: id },
+    rematch: { type: "rematch", playerId: id },
   };
   const action = actions[act];
   if (!action) return;
-  // Planning a shot isn't final, so only ask before a real-time killing blow.
-  if (act === "shoot" && s.config.mode !== "rounds" && !confirmShoot(s, target)) return;
   const sent = await send(action);
   if (sent && act === "leave" && ui.session) {
     clearSession(ui.session.gameId);
@@ -719,7 +721,7 @@ async function onButton(act: string, button: HTMLButtonElement): Promise<void> {
   }
 }
 
-/** One click from the home screen to a running Quick game against bots. */
+/** One click from the home screen to a running game (default pace) against bots. */
 async function startPractice(form: HTMLFormElement | null): Promise<void> {
   if (!form?.reportValidity()) return;
   const name = String(new FormData(form).get("name")).trim();
@@ -731,11 +733,6 @@ async function startPractice(form: HTMLFormElement | null): Promise<void> {
     await api.act(session, { type: "start", playerId: r.playerId, now: 0 });
     goTo(r.gameId);
   });
-}
-
-function confirmShoot(s: GameState, targetId: string): boolean {
-  const t = s.tanks[targetId];
-  return !t || t.hearts > 1 || confirm(`This will destroy ${t.name}. Fire?`);
 }
 
 async function send(action: PlayerAction): Promise<boolean> {

@@ -61,3 +61,6 @@ Each game uses one of two timing modes (*real time* by default; the **Rounds** p
 ## Winning
 
 The last tank standing wins. Alliances, betrayals and diplomacy are entirely up to the players.
+
+Afterwards the host can click **Play again**: everyone goes back to the lobby with the same rules and
+fresh tanks (players can still join or leave) for a rematch.

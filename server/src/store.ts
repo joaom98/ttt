@@ -195,6 +195,8 @@ export class GameStore {
       // The rules hand the host role to the next player in line — never let that be a bot.
       if (game.bots[game.state.hostId]) game.state = { ...game.state, hostId: humans[0]! };
     }
+    // Bots start the new match with a fresh "don't pounce at the start" delay.
+    if (action.type === "rematch") for (const botId of Object.keys(game.bots)) this.botNextAt.delete(`${game.state.id}:${botId}`);
     this.commit(game.state.id, stamped);
     return { ok: true, value: game.state };
   }
@@ -356,6 +358,7 @@ export class GameStore {
         game.state.config.mode ??= "realtime"; // saved before rounds mode existed
         game.state.orders ??= {};
         game.state.resolving ??= null;
+        game.state.autoSize ??= false; // saved before rematches existed
         this.games.set(game.state.id, game);
       } catch (e) {
         console.warn(`Skipping unreadable game file ${name}:`, e);
