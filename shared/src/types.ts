@@ -115,6 +115,7 @@ export type Action =
   | { type: "leave"; playerId: string }
   | { type: "start"; playerId: string; now: number }
   | { type: "rematch"; playerId: string }
+  | { type: "configure"; playerId: string; config: Partial<GameConfig> }
   | OrderAction
   | { type: "juryVote"; playerId: string; targetId: string }
   | { type: "order"; playerId: string; order: OrderAction }

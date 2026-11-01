@@ -3,7 +3,7 @@
 // The shared rules (canApply, distance…) decide what's highlighted and which buttons are enabled,
 // so the UI can never disagree with the server about what's legal.
 
-import { DEFAULT_PRESET, PRESETS } from "../../shared/src/config.ts";
+import { DEFAULT_PRESET, makeConfig, PRESETS } from "../../shared/src/config.ts";
 import { canApply, distance, juryTally, livingTanks, tankAt } from "../../shared/src/rules.ts";
 import type { GameConfig, GameState, OrderAction, PlayerAction, Tank } from "../../shared/src/types.ts";
 import { BOT_PERSONALITIES, type BotPersonality, type ChatMessage, type StateMessage } from "../../shared/src/view.ts";
@@ -129,6 +129,60 @@ async function renderHome(): Promise<void> {
   }
 }
 
+/**
+ * The host's rules editor in the lobby, filled in with the current rules. Every change is sent
+ * straight away; the server clamps it and everyone's summary updates. Fields are marked
+ * data-server so a re-render shows the server's value, except in the field being typed in.
+ */
+const RULE_NUMBERS: [keyof GameConfig, string][] = [
+  ["startingHearts", "Starting hearts"], ["startingRange", "Starting range"], ["startingAP", "Starting AP"],
+  ["apPerTick", "AP per tick"], ["upgradeRangeCost", "Range upgrade cost"], ["juryVotesNeeded", "Jury votes for bonus AP"],
+  ["heartsSpawnedPerTick", "Hearts spawned per tick"],
+];
+const RULE_SWITCHES: [keyof GameConfig, string][] = [
+  ["allowGiveHeart", "Tanks can give hearts"], ["heartRevives", "A heart revives a dead tank"],
+  ["killerTakesAP", "Killer takes the victim's AP"], ["debug", "Debug mode (host can force ticks)"],
+];
+
+function rulesForm(c: GameConfig): string {
+  const field = (id: string, label: string, value: string, attrs = "") =>
+    `<label class="small">${label}<input type="number" id="rule-${id}" name="${id}" min="0" value="${value}" data-server ${attrs} /></label>`;
+  const presets = Object.entries(PRESETS).map(([key, p]) => `<option value="${key}">${esc(p.label)}</option>`).join("");
+  return `
+    <form id="rules-form" class="rules-form">
+      <h3>Rules <span class="muted small">changes apply right away</span></h3>
+      <div class="tweaks">
+        <label class="small wide">Start from a pace
+          <select id="rule-preset" name="preset" data-server><option value="">Choose one to load its rules…</option>${presets}</select></label>
+        <label class="small wide">Timing
+          <select id="rule-mode" name="mode" data-server>
+            <option value="rounds" ${c.mode === "rounds" ? "selected" : ""}>Rounds — plan in secret, resolve in random order</option>
+            <option value="realtime" ${c.mode === "realtime" ? "selected" : ""}>Real time — act whenever you have AP</option>
+          </select></label>
+        ${field("tickSeconds", c.mode === "rounds" ? "Seconds per round" : "Seconds between ticks", String(c.tickIntervalMs / 1000), 'min="5"')}
+        ${field("width", "Board size (blank = auto)", c.width ? String(c.width) : "", 'placeholder="auto"')}
+        ${RULE_NUMBERS.map(([key, label]) => field(key, label, String(c[key]))).join("")}
+        ${RULE_SWITCHES.map(([key, label]) =>
+          `<label class="check small"><input type="checkbox" id="rule-${key}" name="${key}" data-server ${c[key] ? "checked" : ""} /> ${label}</label>`).join("")}
+      </div>
+    </form>`;
+}
+
+/** Turn the rules editor (or a picked pace) into the config to send. */
+function readRules(form: HTMLFormElement, changed: Element): Partial<GameConfig> {
+  if (changed instanceof HTMLSelectElement && changed.name === "preset") {
+    const preset = PRESETS[changed.value];
+    return preset ? makeConfig(preset.config) : {};
+  }
+  const data = new FormData(form);
+  const num = (name: string) => Number(String(data.get(name) ?? "").trim() || 0);
+  const config: Record<string, unknown> = { mode: data.get("mode"), tickIntervalMs: num("tickSeconds") * 1000 };
+  config.width = config.height = num("width"); // blank = 0 = pick automatically
+  for (const [key] of RULE_NUMBERS) config[key] = num(key);
+  for (const [key] of RULE_SWITCHES) config[key] = data.get(key) === "on";
+  return config as Partial<GameConfig>;
+}
+
 function numberField(name: string, label: string, placeholder?: number): string {
   return `<label class="small">${label}<input type="number" name="${name}" min="0" placeholder="${placeholder ?? ""}" /></label>`;
 }
@@ -215,9 +269,10 @@ function renderGame(): void {
  * typing, where their cursor is and how far the chat is scrolled, and put it all back afterwards.
  */
 function preserveInputs(): () => void {
-  const fields = [...app.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input[id]:not([readonly]), select[id]")]
-    .map((el) => ({ id: el.id, value: el.value }));
   const active = document.activeElement;
+  const fields = [...app.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input[id]:not([readonly]), select[id]")]
+    .filter((el) => !el.hasAttribute("data-server") || el === active) // server-owned fields show the server's value
+    .map((el) => ({ id: el.id, value: el.value }));
   const focusId = active instanceof HTMLElement && app.contains(active) ? active.id : "";
   const caret = active instanceof HTMLInputElement && active.type === "text" ? [active.selectionStart, active.selectionEnd] : null;
   const log = document.getElementById("chat-log");
@@ -275,6 +330,7 @@ function lobbyView(s: GameState): string {
         jury needs ${c.juryVotesNeeded} votes${c.heartsSpawnedPerTick ? ` · ${c.heartsSpawnedPerTick} heart(s) spawn per tick` : ""}
         ${c.debug ? " · <b>debug on</b>" : ""}
       </p>
+      ${isHost ? rulesForm(c) : ""}
       ${mine
         ? `<div class="row">
             ${isHost ? `<button class="primary" data-act="start" ${s.order.length < 2 ? "disabled" : ""}>Start game</button>` : `<span class="muted">Waiting for the host to start…</span>`}
@@ -583,6 +639,16 @@ app.addEventListener("click", (e) => {
     ui.targetId = ui.targetId === chip.dataset.tank ? null : (chip.dataset.tank ?? null);
     renderGame();
   }
+});
+
+// The host's rules editor in the lobby sends each change as it happens.
+app.addEventListener("change", (e) => {
+  const el = e.target as Element;
+  const form = el.closest<HTMLFormElement>("#rules-form");
+  const mine = ui.msg && me(ui.msg.state);
+  if (!form || !mine) return;
+  const config = readRules(form, el);
+  if (Object.keys(config).length) void send({ type: "configure", playerId: mine.id, config });
 });
 
 app.addEventListener("submit", async (e) => {

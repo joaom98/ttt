@@ -353,6 +353,36 @@ describe("rounds mode", () => {
   });
 });
 
+describe("changing the rules in the lobby", () => {
+  it("lets the host change some rules and keeps the rest", () => {
+    const s = ok(lobby(["Ana", "Bia"]), { type: "configure", playerId: "p0", config: { mode: "rounds", startingHearts: 5 } });
+    assert.equal(s.config.mode, "rounds");
+    assert.equal(s.config.startingHearts, 5);
+    assert.equal(s.config.startingRange, 2, "untouched rules stay");
+    const started = ok(s, { type: "start", playerId: "p0", now: 0 });
+    assert.ok(Object.values(started.tanks).every((t) => t.hearts === 5));
+  });
+
+  it("clamps silly values and ignores unknown or mistyped ones", () => {
+    const s = ok(lobby(["Ana", "Bia"]), {
+      type: "configure", playerId: "p0",
+      config: { startingHearts: 999, width: 2, debug: "yes" as unknown as boolean, mode: "chaos" as "rounds", nonsense: 1 } as Partial<GameConfig>,
+    });
+    assert.equal(s.config.startingHearts, 20);
+    assert.equal(s.config.width, 5);
+    assert.equal(s.config.debug, false);
+    assert.equal(s.config.mode, "realtime");
+    assert.equal("nonsense" in s.config, false);
+  });
+
+  it("is only for the host, and only before the game starts", () => {
+    const s = lobby(["Ana", "Bia"]);
+    assert.match(err(s, { type: "configure", playerId: "p1", config: { startingHearts: 1 } }), /host/);
+    const started = ok(s, { type: "start", playerId: "p0", now: 0 });
+    assert.match(err(started, { type: "configure", playerId: "p0", config: { startingHearts: 1 } }), /lobby/);
+  });
+});
+
 describe("rematch", () => {
   const finished = () => ok(board([{ x: 0, y: 0, ap: 3 }, { x: 1, y: 1, hearts: 1 }]), { type: "shoot", playerId: "p0", targetId: "p1" });
 

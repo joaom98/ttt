@@ -68,8 +68,9 @@ and buttons to enable, so the UI and the server always agree on what's legal.
 - **Change a rule:** edit `shared/src/rules.ts`, add or adjust a test in `shared/test/rules.test.ts`,
   keep `npm run test:watch` running. The server restarts by itself under `npm run dev`.
 - **Add a rule switch** (so you can A/B it in playtests): add a field to `GameConfig` in `types.ts`, a
-  default in `config.ts`, use it in `rules.ts`, and add a field to the "Rule tweaks" form in
-  `client/src/main.ts`.
+  default in `config.ts`, use it in `rules.ts`, and add a field to the "Rule tweaks" form and to the
+  lobby's rules editor (`RULE_NUMBERS` / `RULE_SWITCHES`) in `client/src/main.ts`. The host can change
+  every rule in the lobby before starting, so no need to recreate a game to try a tweak.
 - **Change the pace presets:** `PRESETS` in `shared/src/config.ts`.
 - **Change the UI:** `client/src/main.ts` and `client/style.css` — just refresh the browser.
 - **Change how bots play:** `chooseBotAction` in `server/src/bots.ts`. Bots only ever send normal player

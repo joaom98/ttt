@@ -168,6 +168,14 @@ export function applyAction(prev: GameState, action: Action): Result {
     return ok();
   }
 
+  if (action.type === "configure") {
+    if (s.phase !== "lobby") return fail("The rules can only change in the lobby.");
+    if (action.playerId !== s.hostId) return fail("Only the host can change the rules.");
+    // Merge over the current rules; makeConfig drops unknown keys and clamps the numbers.
+    s.config = makeConfig({ ...s.config, ...action.config });
+    return ok();
+  }
+
   if (action.type === "rematch") {
     if (s.phase !== "finished") return fail("The game isn't over yet.");
     if (action.playerId !== s.hostId) return fail("Only the host can start a rematch.");
