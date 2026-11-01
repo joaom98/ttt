@@ -4,7 +4,7 @@
 import { randomBytes, randomInt } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { MAX_PLAYERS, PRESETS } from "../../shared/src/config.ts";
+import { makeConfig, MAX_PLAYERS, PRESETS } from "../../shared/src/config.ts";
 import { applyAction, createGame, isOrder } from "../../shared/src/rules.ts";
 import type { Action, GameConfig, GameState, PlayerAction } from "../../shared/src/types.ts";
 import { BOT_PERSONALITIES, chatFor, type BotPersonality, type ChatMessage, type LobbySummary } from "../../shared/src/view.ts";
@@ -195,32 +195,47 @@ export class GameStore {
       // The rules hand the host role to the next player in line — never let that be a bot.
       if (game.bots[game.state.hostId]) game.state = { ...game.state, hostId: humans[0]! };
     }
+    if (action.type === "kick") {
+      // The kicked player's browser loses its seat (its token no longer matches a player).
+      for (const [t, id] of Object.entries(game.tokens)) if (id === action.targetId) delete game.tokens[t];
+      delete game.bots[action.targetId];
+    }
     // Bots start the new match with a fresh "don't pounce at the start" delay.
     if (action.type === "rematch") for (const botId of Object.keys(game.bots)) this.botNextAt.delete(`${game.state.id}:${botId}`);
     this.commit(game.state.id, stamped);
     return { ok: true, value: game.state };
   }
 
-  /** Debug helper: the host of a debug game can trigger the next tick immediately. */
+  /** Debug helper: the host of a debug game can trigger the next AP tick immediately. */
   forceTick(gameId: string, token: string): Outcome<GameState> {
-    const game = this.games.get(gameId.toUpperCase());
-    if (!game) return fail("Game not found.", 404);
-    if (game.tokens[token] !== game.state.hostId) return fail("Only the host can do that.", 403);
-    if (!game.state.config.debug) return fail("Debug mode is off for this game.", 403);
-    return this.tick(game) ?? { ok: true, value: game.state };
+    const game = this.debugGame(gameId, token);
+    if (!game.ok) return game;
+    return this.tick(game.value) ?? { ok: true, value: game.value.state };
   }
 
-  /** Run any ticks — and, in rounds mode, resolution steps — that are due. Called by the server's timer. */
+  /** Debug helper: in rounds mode, the host of a debug game can end the round's planning now. */
+  forceRound(gameId: string, token: string): Outcome<GameState> {
+    const game = this.debugGame(gameId, token);
+    if (!game.ok) return game;
+    return this.endRound(game.value) ?? { ok: true, value: game.value.state };
+  }
+
+  /**
+   * Run whatever is due on the two clocks — AP ticks and, in rounds mode, the end of each round
+   * and its resolution steps. They're independent: a tick can land while a round plays out.
+   * Called by the server's timer.
+   */
   runDueTicks(): void {
     const now = this.now();
     for (const game of this.games.values()) {
-      const s = game.state;
-      if (s.phase !== "playing") continue;
-      if (s.resolving) {
-        if (s.resolving.nextAt <= now) this.resolveStep(game);
-      } else if (s.nextTickAt !== null && s.nextTickAt <= now) {
-        this.tick(game);
+      if (game.state.phase !== "playing") continue;
+      const r = game.state.resolving;
+      if (r) {
+        if (r.nextAt <= now) this.resolveStep(game);
+      } else if (game.state.nextRoundAt !== null && game.state.nextRoundAt <= now) {
+        this.endRound(game);
       }
+      if (game.state.phase === "playing" && game.state.nextTickAt !== null && game.state.nextTickAt <= now) this.tick(game);
     }
   }
 
@@ -273,25 +288,38 @@ export class GameStore {
     for (const listener of this.listeners.get(gameId) ?? []) listener(game.state, cause);
   }
 
-  /** The tick: real-time AP income, or (rounds mode) the end of planning. Returns an error, if any. */
+  /** An AP tick (both modes). Returns an error, if any. */
   private tick(game: StoredGame): Outcome<never> | null {
     const now = this.now();
-    const result = applyAction(game.state, { type: "tick", now });
+    const tick: Action = { type: "tick", now };
+    const result = applyAction(game.state, tick);
     if (!result.ok) return fail(result.error);
     game.state = result.state;
-    // A round that starts playing out has nothing to animate yet; a plain tick pays AP.
-    this.commit(game.state.id, game.state.resolving ? null : { type: "tick", now });
+    this.commit(game.state.id, tick); // clients float "+1 AP" over each tank
     return null;
   }
 
-  /** Rounds mode: play out the next order (or, once all have played, the tick that ends the round). */
+  /** Rounds mode: planning is over; the round starts playing out. Returns an error, if any. */
+  private endRound(game: StoredGame): Outcome<never> | null {
+    const result = applyAction(game.state, { type: "endRound", now: this.now() });
+    if (!result.ok) return fail(result.error);
+    game.state = result.state;
+    this.commit(game.state.id); // nothing to animate until the first step
+    return null;
+  }
+
+  /** Rounds mode: play out the next order (or, once all have played, finish the round). */
   private resolveStep(game: StoredGame): void {
-    const now = this.now();
-    const result = applyAction(game.state, { type: "resolveStep", now });
+    const result = applyAction(game.state, { type: "resolveStep", now: this.now() });
     if (!result.ok) return;
     game.state = result.state;
-    const r = game.state.resolving;
-    this.commit(game.state.id, r ? r.done : { type: "tick", now });
+    this.commit(game.state.id, game.state.resolving?.done ?? null);
+  }
+
+  private debugGame(gameId: string, token: string): Outcome<StoredGame> {
+    const game = this.hostGame(gameId, token);
+    if (game.ok && !game.value.state.config.debug) return fail("Debug mode is off for this game.", 403);
+    return game;
   }
 
   /**
@@ -359,6 +387,14 @@ export class GameStore {
         game.state.orders ??= {};
         game.state.resolving ??= null;
         game.state.autoSize ??= false; // saved before rematches existed
+        // Saved before the separate round clock, healing and stuns: fill in the new rules and state.
+        game.state.config = makeConfig({ ...game.state.config, roundIntervalMs: game.state.config.roundIntervalMs ?? game.state.config.tickIntervalMs });
+        game.state.round ??= 0;
+        game.state.nextRoundAt ??= game.state.config.mode === "rounds" && game.state.phase === "playing" && !game.state.resolving
+          ? this.now() + game.state.config.roundIntervalMs
+          : null;
+        if (game.state.resolving) game.state.resolving.sittingOut ??= [];
+        for (const t of Object.values(game.state.tanks)) t.stunned ??= false;
         this.games.set(game.state.id, game);
       } catch (e) {
         console.warn(`Skipping unreadable game file ${name}:`, e);

@@ -14,11 +14,17 @@ export const DEFAULT_CONFIG: GameConfig = {
   apPerTick: 1,
   upgradeRangeCost: 3,
   tickIntervalMs: 24 * HOUR,
+  roundIntervalMs: 10 * SECOND,
   juryVotesNeeded: 3,
   heartsSpawnedPerTick: 0,
   allowGiveHeart: true,
   heartRevives: true,
   killerTakesAP: true,
+  allowHeal: true,
+  healCost: 3,
+  parrySteal: 1,
+  parryStuns: true,
+  parryDamage: 0,
   debug: false,
 };
 
@@ -26,7 +32,7 @@ export const DEFAULT_CONFIG: GameConfig = {
 export const PRESETS: Record<string, { label: string; config: Partial<GameConfig> }> = {
   rounds: {
     label: "Rounds — one secret order every 10s, resolved in random order",
-    config: { mode: "rounds", tickIntervalMs: 10 * SECOND, startingAP: 1 },
+    config: { mode: "rounds", roundIntervalMs: 10 * SECOND, tickIntervalMs: 10 * SECOND, startingAP: 1 },
   },
   classic: { label: "Classic — 1 AP every 24h", config: {} },
   evening: { label: "Evening — 1 AP every 10 min", config: { tickIntervalMs: 10 * 60 * SECOND } },
@@ -44,8 +50,10 @@ export const TANK_COLORS = [
 
 /** The preset picked by default and used for practice games. */
 export const DEFAULT_PRESET = "rounds";
-/** AP a parry costs; a parried shooter also loses this much AP to the defender. */
-export const PARRY_COST = 1;
+/** AP a defense costs: it blocks shots, nothing more. */
+export const DEFENSE_COST = 1;
+/** AP a parry costs: it blocks shots and punishes the shooter (set per game: parrySteal / parryStuns / parryDamage). */
+export const PARRY_COST = 2;
 /** Rounds mode: pause between resolution steps, so everyone can follow (and animate) each order. */
 export const RESOLVE_STEP_MS = 700;
 
@@ -76,6 +84,10 @@ export function makeConfig(overrides: Partial<GameConfig> = {}): GameConfig {
   c.apPerTick = clamp(c.apPerTick, 0, 100);
   c.upgradeRangeCost = clamp(c.upgradeRangeCost, 0, 100);
   c.tickIntervalMs = clamp(c.tickIntervalMs, 5 * SECOND, 7 * 24 * HOUR);
+  c.roundIntervalMs = clamp(c.roundIntervalMs, 3 * SECOND, 10 * 60 * SECOND);
+  c.healCost = clamp(c.healCost, 0, 100);
+  c.parrySteal = clamp(c.parrySteal, 0, 100);
+  c.parryDamage = clamp(c.parryDamage, 0, 20);
   c.juryVotesNeeded = clamp(c.juryVotesNeeded, 1, 100);
   c.heartsSpawnedPerTick = clamp(c.heartsSpawnedPerTick, 0, 20);
   return c;

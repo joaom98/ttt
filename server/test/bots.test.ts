@@ -23,7 +23,7 @@ describe("bots", () => {
       strong: { x: 6, y: 5, hearts: 3 },
       weak: { x: 4, y: 4, hearts: 1 },
     });
-    assert.deepEqual(chooseBotAction(s, "bot", "hunter"), { type: "shoot", playerId: "bot", targetId: "weak" });
+    assert.deepEqual(chooseBotAction(s, "bot", "hunter"), { type: "shoot", playerId: "bot", x: 4, y: 4 });
   });
 
   it("hunters close in but keep 1 AP for the shot", () => {
@@ -33,16 +33,19 @@ describe("bots", () => {
     assert.deepEqual(chooseBotAction(s, "bot", "hunter"), { type: "move", playerId: "bot", dx: 1, dy: 1 });
   });
 
-  it("turtles under fire usually parry", () => {
+  it("turtles under fire usually brace: a parry if they can afford it, else a defense", () => {
     const s = game({ bot: { x: 5, y: 5, ap: 1, range: 1 }, threat: { x: 7, y: 5, range: 2 } });
+    assert.deepEqual(chooseBotAction(s, "bot", "turtle", () => 0.9), { type: "defend", playerId: "bot" }, "1 AP: no parry");
+    assert.deepEqual(chooseBotAction(s, "bot", "turtle", () => 0.5), { type: "defend", playerId: "bot" });
+    s.tanks.bot!.ap = 2;
     assert.deepEqual(chooseBotAction(s, "bot", "turtle", () => 0.9), { type: "parry", playerId: "bot" });
-    s.tanks.bot!.parrying = true;
+    s.tanks.bot!.guard = "defense";
     assert.equal(chooseBotAction(s, "bot", "turtle", () => 0.9)?.type, "move", "already braced: back off instead");
   });
 
-  it("hunters don't shoot into a visible parry", () => {
-    const s = game({ bot: { x: 5, y: 5, ap: 2 }, guarded: { x: 6, y: 5, hearts: 1, parrying: true }, open: { x: 4, y: 4 } });
-    assert.deepEqual(chooseBotAction(s, "bot", "hunter"), { type: "shoot", playerId: "bot", targetId: "open" });
+  it("hunters don't shoot into a visible defense or parry", () => {
+    const s = game({ bot: { x: 5, y: 5, ap: 2 }, guarded: { x: 6, y: 5, hearts: 1, guard: "parry" }, open: { x: 4, y: 4 } });
+    assert.deepEqual(chooseBotAction(s, "bot", "hunter"), { type: "shoot", playerId: "bot", x: 4, y: 4 });
     s.tanks.open!.x = 9;
     s.tanks.open!.y = 0;
     assert.equal(chooseBotAction(s, "bot", "hunter"), null, "waits rather than wasting AP");
@@ -61,7 +64,7 @@ describe("bots", () => {
 
   it("turtles always take a kill", () => {
     const s = game({ bot: { x: 5, y: 5, ap: 1 }, prey: { x: 6, y: 6, hearts: 1 } });
-    assert.deepEqual(chooseBotAction(s, "bot", "turtle"), { type: "shoot", playerId: "bot", targetId: "prey" });
+    assert.deepEqual(chooseBotAction(s, "bot", "turtle"), { type: "shoot", playerId: "bot", x: 6, y: 6 });
   });
 
   it("dead bots vote for the underdog on the jury", () => {

@@ -14,7 +14,7 @@ export const BOT_NAMES: Record<BotPersonality, string[]> = {
 
 export const BOT_DESCRIPTIONS: Record<BotPersonality, string> = {
   hunter: "Hunter: closes in and shoots the weakest tank it can reach",
-  turtle: "Turtle: saves AP, upgrades range, parries or backs off, and only goes for easy kills",
+  turtle: "Turtle: saves AP, upgrades range, heals, defends, parries or backs off, and only goes for easy kills",
   wildcard: "Wildcard: does something random — including gifts",
 };
 
@@ -48,14 +48,15 @@ export function chooseBotAction(
   const enemies = livingTanks(s).filter((t) => t.id !== me.id);
   if (!enemies.length || me.ap < 1) return null;
   const inReach = enemies.filter((t) => distance(me, t) <= me.range);
-  const shoot = (t: Tank): PlayerAction => ({ type: "shoot", playerId: me.id, targetId: t.id });
+  // Shots go at the square the target is on now.
+  const shoot = (t: Tank): PlayerAction => ({ type: "shoot", playerId: me.id, x: t.x, y: t.y });
   const pickup = stepOntoPickup(s, me);
 
   if (personality === "hunter") {
-    // A tank that is visibly parrying would just eat the shot (and an AP), so pick someone else.
-    const open = inReach.filter((t) => !t.parrying);
+    // A tank that is visibly defending or parrying would just eat the shot, so pick someone else.
+    const open = inReach.filter((t) => !t.guard);
     if (open.length) return legal(shoot(weakest(open)));
-    if (inReach.length) return null; // only parrying tanks in reach: wait it out
+    if (inReach.length) return null; // only guarded tanks in reach: wait it out
     if (pickup) return pickup;
     // Close in, but keep 1 AP for the shot once we get there.
     if (me.ap >= 2) return stepToward(s, me, nearest(me, enemies));
@@ -63,17 +64,24 @@ export function chooseBotAction(
   }
 
   if (personality === "turtle") {
-    const open = inReach.filter((t) => !t.parrying);
+    const open = inReach.filter((t) => !t.guard);
     const killable = open.filter((t) => t.hearts === 1);
     if (killable.length) return legal(shoot(weakest(killable)));
     const threats = enemies.filter((t) => distance(t, me) <= t.range);
     if (threats.length && open.length && me.ap >= 2) return legal(shoot(weakest(open)));
     if (threats.length) {
-      // Under fire: usually brace for it, otherwise back off.
-      const parry = me.parrying || random() < 0.4 ? null : legal({ type: "parry", playerId: me.id });
-      if (parry) return parry;
+      // Under fire: usually brace for it — a parry when it can afford one, else a defense — otherwise back off.
+      const roll = random();
+      if (!me.guard && roll >= 0.4) {
+        const guard = legal({ type: roll >= 0.7 ? "parry" : "defend", playerId: me.id }) ?? legal({ type: "defend", playerId: me.id });
+        if (guard) return guard;
+      }
       const away = stepAway(s, me, threats);
       if (away) return away;
+    }
+    if (me.hearts < s.config.startingHearts) {
+      const heal = legal({ type: "heal", playerId: me.id });
+      if (heal) return heal;
     }
     if (pickup) return pickup;
     if (me.ap >= s.config.upgradeRangeCost + 1) return legal({ type: "upgradeRange", playerId: me.id });
@@ -137,11 +145,20 @@ function stepAway(s: GameState, me: Tank, threats: Tank[]): PlayerAction | null 
 }
 
 function allActions(s: GameState, me: Tank): PlayerAction[] {
-  const actions: PlayerAction[] = [...moves(s, me), { type: "upgradeRange", playerId: me.id }, { type: "parry", playerId: me.id }];
+  const actions: PlayerAction[] = [
+    ...moves(s, me),
+    { type: "upgradeRange", playerId: me.id },
+    { type: "defend", playerId: me.id },
+    { type: "parry", playerId: me.id },
+    { type: "heal", playerId: me.id },
+  ];
+  // Wildcards fire at random squares in range — sometimes at a tank, mostly at nothing.
+  for (let y = me.y - me.range; y <= me.y + me.range; y++) {
+    for (let x = me.x - me.range; x <= me.x + me.range; x++) actions.push({ type: "shoot", playerId: me.id, x, y });
+  }
   for (const t of Object.values(s.tanks)) {
     if (t.id === me.id) continue;
     actions.push(
-      { type: "shoot", playerId: me.id, targetId: t.id },
       { type: "giveAP", playerId: me.id, targetId: t.id },
       { type: "giveHeart", playerId: me.id, targetId: t.id },
     );

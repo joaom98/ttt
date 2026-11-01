@@ -3,16 +3,16 @@
 // The shared rules (canApply, distance…) decide what's highlighted and which buttons are enabled,
 // so the UI can never disagree with the server about what's legal.
 
-import { DEFAULT_PRESET, makeConfig, PARRY_COST, PRESETS } from "../../shared/src/config.ts";
+import { DEFAULT_PRESET, DEFENSE_COST, makeConfig, PARRY_COST, PRESETS } from "../../shared/src/config.ts";
 import { canApply, distance, juryTally, livingTanks, tankAt } from "../../shared/src/rules.ts";
-import type { GameConfig, GameState, OrderAction, PlayerAction, Tank } from "../../shared/src/types.ts";
+import type { GameConfig, GameState, OrderAction, PlayerAction, Position, Tank } from "../../shared/src/types.ts";
 import { BOT_PERSONALITIES, type BotPersonality, type ChatMessage, type StateMessage } from "../../shared/src/view.ts";
 import { api, clearSession, lastName, loadSession, rememberName, saveSession, subscribe, type Session } from "./api.ts";
 import { animateChange } from "./fx.ts";
 
 const BOT_LABELS: Record<BotPersonality, string> = {
   hunter: "Hunter — chases and shoots the weakest tank",
-  turtle: "Turtle — saves up, parries, upgrades range, picks off easy kills",
+  turtle: "Turtle — saves up, heals, defends or parries, picks off easy kills",
   wildcard: "Wildcard — random moves, shots and gifts",
 };
 
@@ -28,11 +28,15 @@ const ui: {
   msg: StateMessage | null;
   clockOffset: number;
   targetId: string | null;
+  /** An empty square the player clicked: its menu offers "Shoot here" (and "Move here" next door). */
+  square: { x: number; y: number } | null;
+  /** The tank under the mouse, whose range is highlighted on the board. */
+  hoverId: string | null;
   connected: boolean;
   unsubscribe: (() => void) | null;
   busy: boolean;
 } = {
-  gameId: null, session: null, msg: null, clockOffset: 0, targetId: null, connected: false, unsubscribe: null, busy: false,
+  gameId: null, session: null, msg: null, clockOffset: 0, targetId: null, square: null, hoverId: null, connected: false, unsubscribe: null, busy: false,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -43,6 +47,7 @@ function route(): void {
   ui.unsubscribe = null;
   ui.msg = null;
   ui.targetId = null;
+  ui.square = null;
   const code = new URLSearchParams(location.search).get("game");
   if (code) openGame(code.toUpperCase());
   else renderHome();
@@ -83,7 +88,8 @@ async function renderHome(): Promise<void> {
                 <option value="rounds">Rounds — plan in secret, resolve in random order</option>
                 <option value="realtime">Real time — act whenever you have AP</option>
               </select></label>
-            ${numberField("tickSeconds", "Seconds between ticks")}
+            ${numberField("tickSeconds", "Seconds between AP ticks")}
+            ${numberField("roundSeconds", "Seconds per round (rounds)")}
             ${numberField("width", "Board size (blank = auto)")}
             ${numberField("startingHearts", "Starting hearts", 3)}
             ${numberField("startingRange", "Starting range", 2)}
@@ -92,6 +98,11 @@ async function renderHome(): Promise<void> {
             ${numberField("upgradeRangeCost", "Range upgrade cost", 3)}
             ${numberField("juryVotesNeeded", "Jury votes for bonus AP", 3)}
             ${numberField("heartsSpawnedPerTick", "Hearts spawned per tick", 0)}
+            ${numberField("healCost", "Heal cost (AP)", 3)}
+            ${numberField("parrySteal", "AP a parry steals", 1)}
+            ${numberField("parryDamage", "Hearts a parry hits back", 0)}
+            ${checkField("allowHeal", "Tanks can heal with AP", true)}
+            ${checkField("parryStuns", "A parry stuns the shooter for a turn", true)}
             ${checkField("allowGiveHeart", "Tanks can give hearts", true)}
             ${checkField("heartRevives", "A heart revives a dead tank", true)}
             ${checkField("killerTakesAP", "Killer takes the victim's AP", true)}
@@ -137,9 +148,11 @@ async function renderHome(): Promise<void> {
 const RULE_NUMBERS: [keyof GameConfig, string][] = [
   ["startingHearts", "Starting hearts"], ["startingRange", "Starting range"], ["startingAP", "Starting AP"],
   ["apPerTick", "AP per tick"], ["upgradeRangeCost", "Range upgrade cost"], ["juryVotesNeeded", "Jury votes for bonus AP"],
-  ["heartsSpawnedPerTick", "Hearts spawned per tick"],
+  ["heartsSpawnedPerTick", "Hearts spawned per tick"], ["healCost", "Heal cost (AP)"],
+  ["parrySteal", "AP a parry steals"], ["parryDamage", "Hearts a parry hits back"],
 ];
 const RULE_SWITCHES: [keyof GameConfig, string][] = [
+  ["allowHeal", "Tanks can heal with AP"], ["parryStuns", "A parry stuns the shooter for a turn"],
   ["allowGiveHeart", "Tanks can give hearts"], ["heartRevives", "A heart revives a dead tank"],
   ["killerTakesAP", "Killer takes the victim's AP"], ["debug", "Debug mode (host can force ticks)"],
 ];
@@ -159,7 +172,8 @@ function rulesForm(c: GameConfig): string {
             <option value="rounds" ${c.mode === "rounds" ? "selected" : ""}>Rounds — plan in secret, resolve in random order</option>
             <option value="realtime" ${c.mode === "realtime" ? "selected" : ""}>Real time — act whenever you have AP</option>
           </select></label>
-        ${field("tickSeconds", c.mode === "rounds" ? "Seconds per round" : "Seconds between ticks", String(c.tickIntervalMs / 1000), 'min="5"')}
+        ${field("tickSeconds", "Seconds between AP ticks", String(c.tickIntervalMs / 1000), 'min="5"')}
+        ${c.mode === "rounds" ? field("roundSeconds", "Seconds per round", String(c.roundIntervalMs / 1000), 'min="3"') : ""}
         ${field("width", "Board size (blank = auto)", c.width ? String(c.width) : "", 'placeholder="auto"')}
         ${RULE_NUMBERS.map(([key, label]) => field(key, label, String(c[key]))).join("")}
         ${RULE_SWITCHES.map(([key, label]) =>
@@ -177,6 +191,7 @@ function readRules(form: HTMLFormElement, changed: Element): Partial<GameConfig>
   const data = new FormData(form);
   const num = (name: string) => Number(String(data.get(name) ?? "").trim() || 0);
   const config: Record<string, unknown> = { mode: data.get("mode"), tickIntervalMs: num("tickSeconds") * 1000 };
+  if (data.has("roundSeconds")) config.roundIntervalMs = num("roundSeconds") * 1000;
   config.width = config.height = num("width"); // blank = 0 = pick automatically
   for (const [key] of RULE_NUMBERS) config[key] = num(key);
   for (const [key] of RULE_SWITCHES) config[key] = data.get(key) === "on";
@@ -197,13 +212,15 @@ function readTweaks(form: HTMLFormElement): Partial<GameConfig> {
   const config: Record<string, number | boolean | string> = {};
   const mode = String(data.get("mode") ?? "");
   if (mode) config.mode = mode;
-  for (const key of ["width", "startingHearts", "startingRange", "startingAP", "apPerTick", "upgradeRangeCost", "juryVotesNeeded", "heartsSpawnedPerTick"]) {
+  for (const key of ["width", "startingHearts", "startingRange", "startingAP", "apPerTick", "upgradeRangeCost", "juryVotesNeeded", "heartsSpawnedPerTick", "healCost", "parrySteal", "parryDamage"]) {
     const v = String(data.get(key) ?? "").trim();
     if (v !== "") config[key] = Number(v);
   }
   if (config.width !== undefined) config.height = config.width;
   const secs = String(data.get("tickSeconds") ?? "").trim();
   if (secs !== "") config.tickIntervalMs = Number(secs) * 1000;
+  const roundSecs = String(data.get("roundSeconds") ?? "").trim();
+  if (roundSecs !== "") config.roundIntervalMs = Number(roundSecs) * 1000;
   for (const box of form.querySelectorAll<HTMLInputElement>("input[type=checkbox]")) {
     const def = box.dataset.default;
     // Only send switches the player actually changed from their default.
@@ -261,6 +278,7 @@ function renderGame(): void {
   app.innerHTML = s.phase === "lobby" ? lobbyView(s) : boardView(s);
   restore();
   placePopover();
+  paintHover();
   updateCountdown();
 }
 
@@ -309,7 +327,7 @@ function lobbyView(s: GameState): string {
     .map((id) => s.tanks[id]!)
     .map((t) => `<li><span class="swatch" style="--c:${t.color}"></span>${esc(t.name)}${t.id === s.hostId ? ` <span class="badge">host</span>` : ""}${t.id === mine?.id ? ` <span class="badge you">you</span>` : ""}
       ${bots[t.id] ? ` <span class="badge bot" title="${esc(BOT_LABELS[bots[t.id]!])}">🤖 ${bots[t.id]}</span>` : ""}
-      ${bots[t.id] && isHost ? `<button class="link small" data-act="remove-bot" data-id="${t.id}" aria-label="Remove ${esc(t.name)}">Remove</button>` : ""}</li>`)
+      ${isHost && t.id !== s.hostId ? `<button class="link small" data-act="kick" data-id="${t.id}" aria-label="Remove ${esc(t.name)} from the lobby">Remove</button>` : ""}</li>`)
     .join("");
   const botOptions = BOT_PERSONALITIES.map((p) => `<option value="${p}">${esc(BOT_LABELS[p])}</option>`).join("");
   return `
@@ -325,9 +343,10 @@ function lobbyView(s: GameState): string {
         ? `<div class="row add-bot"><select id="bot-kind" aria-label="Kind of bot">${botOptions}</select><button data-act="add-bot">Add bot</button></div>`
         : ""}
       <p class="muted small">
-        <b>${c.mode === "rounds" ? "Planned rounds" : "Real time"}</b> · ${c.startingHearts} hearts · range ${c.startingRange} · ${c.startingAP} starting AP ·
+        <b>${c.mode === "rounds" ? `Rounds of ${fmtDuration(c.roundIntervalMs)}` : "Real time"}</b> · ${c.startingHearts} hearts · range ${c.startingRange} · ${c.startingAP} starting AP ·
         ${c.apPerTick} AP every ${fmtDuration(c.tickIntervalMs)} · range upgrade ${c.upgradeRangeCost} AP ·
-        jury needs ${c.juryVotesNeeded} votes${c.heartsSpawnedPerTick ? ` · ${c.heartsSpawnedPerTick} heart(s) spawn per tick` : ""}
+        jury needs ${c.juryVotesNeeded} votes${c.heartsSpawnedPerTick ? ` · ${c.heartsSpawnedPerTick} heart(s) spawn per tick` : ""} ·
+        ${c.allowHeal ? `heal ${c.healCost} AP` : "no healing"} · parry takes ${c.parrySteal} AP${c.parryStuns ? " and stuns" : ""}${c.parryDamage ? `, hits back ${c.parryDamage} ♥` : ""}
         ${c.debug ? " · <b>debug on</b>" : ""}
       </p>
       ${isHost ? rulesForm(c) : ""}
@@ -374,12 +393,21 @@ function boardView(s: GameState): string {
   const hint = !(mine?.alive && s.phase === "playing")
     ? ""
     : s.config.mode === "rounds"
-      ? "Each round, pick one order: click a green square (or Q W E / A D / Z X C) to move, or a tank to shoot or give. " +
-        "When the timer runs out, everyone's orders play out one player at a time, in a random order."
-      : "Click your tank to upgrade, another tank to shoot or trade. Move by clicking a green square or with Q W E / A D / Z X C.";
+      ? "Each round, pick one order: click a green square (or Q W E / A D / Z X C) to move, your tank to guard, heal or upgrade, " +
+        "or a tank — or any square in range — to shoot it. Shots hit whoever is on the square when they land, so aim where your " +
+        "target will be. Right-click any square for its menu. Orders play out one player at a time, in a random order."
+      : "Click your tank to guard, heal or upgrade; another tank to shoot or trade; an empty square in range (or right-click any " +
+        "square) to fire at it. Move by clicking a green square or with Q W E / A D / Z X C.";
+
+  const square = !target && ui.square ? ui.square : null;
+  const pop = target
+    ? `<div id="popover" class="popover" role="dialog" aria-label="${esc(target.name)}" style="--c:${target.color}">${popover(s, mine, plan, target)}</div>`
+    : square
+      ? `<div id="popover" class="popover" role="dialog" aria-label="Square ${coord(square)}" style="--c:var(--accent)">${squarePopover(s, mine, plan, square)}</div>`
+      : "";
 
   return `
-    <nav class="top"><a href="/" data-link>← Home</a><span class="muted">Game <b>${s.id}</b> · tick ${s.tick}</span></nav>
+    <nav class="top"><a href="/" data-link>← Home</a><span class="muted">Game <b>${s.id}</b> · tick ${s.tick}${s.config.mode === "rounds" ? ` · round ${s.round}` : ""}</span></nav>
     ${banner}
     <div class="game">
       <section class="play">
@@ -393,7 +421,7 @@ function boardView(s: GameState): string {
         ${logPanel(s)}
       </aside>
     </div>
-    ${target ? `<div id="popover" class="popover" role="dialog" aria-label="${esc(target.name)}" style="--c:${target.color}">${popover(s, mine, plan, target)}</div>` : ""}`;
+    ${pop}`;
 }
 
 /** Rounds mode while you plan: your one order for the round, and what to draw for it. */
@@ -402,31 +430,39 @@ interface Plan {
   order: OrderAction | undefined;
   /** "x,y" of the square your planned move goes to. */
   moveTo: string | null;
-  /** tank id -> icon for the order aimed at it (💥 ⚡ ♥ ⬆). */
+  /** "x,y" of the square your planned shot is aimed at. */
+  aim: string | null;
+  /** tank id -> icon for the order aimed at it (⚡ ♥ ⬆ 🛡️ ⚔️ ➕). */
   marks: Map<string, string>;
 }
 
-const ORDER_ICONS = { move: "➜", shoot: "💥", giveAP: "⚡", giveHeart: "♥", upgradeRange: "⬆", parry: "🛡️" } as const;
+const ORDER_ICONS = {
+  move: "➜", shoot: "💥", giveAP: "⚡", giveHeart: "♥", upgradeRange: "⬆", defend: "🛡️", parry: "⚔️", heal: "➕",
+} as const;
 
 function planFor(s: GameState, mine: Tank | undefined): Plan {
   const planning = s.config.mode === "rounds" && s.phase === "playing" && !s.resolving && !!mine?.alive;
   const order = planning && mine ? s.orders[mine.id] : undefined;
-  const plan: Plan = { planning, order, moveTo: null, marks: new Map() };
+  const plan: Plan = { planning, order, moveTo: null, aim: null, marks: new Map() };
   if (!order || !mine) return plan;
   if (order.type === "move") plan.moveTo = `${mine.x + order.dx},${mine.y + order.dy}`;
-  else plan.marks.set(order.type === "upgradeRange" || order.type === "parry" ? mine.id : order.targetId, ORDER_ICONS[order.type]);
+  else if (order.type === "shoot") plan.aim = `${order.x},${order.y}`;
+  else if (order.type === "giveAP" || order.type === "giveHeart") plan.marks.set(order.targetId, ORDER_ICONS[order.type]);
+  else plan.marks.set(mine.id, ORDER_ICONS[order.type]);
   return plan;
 }
 
 function describeOrder(s: GameState, o: OrderAction): string {
   const name = (id: string) => esc(s.tanks[id]?.name ?? "?");
   switch (o.type) {
-    case "move": return `${ORDER_ICONS.move} Move to ${colName(s.tanks[o.playerId]!.x + o.dx)}${s.tanks[o.playerId]!.y + o.dy + 1}`;
-    case "shoot": return `${ORDER_ICONS.shoot} Shoot ${name(o.targetId)}`;
+    case "move": return `${ORDER_ICONS.move} Move to ${coord({ x: s.tanks[o.playerId]!.x + o.dx, y: s.tanks[o.playerId]!.y + o.dy })}`;
+    case "shoot": return `${ORDER_ICONS.shoot} Shoot ${coord(o)}${tankAt(s, o)?.alive ? ` (${name(tankAt(s, o)!.id)} is there now)` : ""}`;
     case "giveAP": return `${ORDER_ICONS.giveAP} Give 1 AP to ${name(o.targetId)}`;
     case "giveHeart": return `${ORDER_ICONS.giveHeart} Give a heart to ${name(o.targetId)}`;
     case "upgradeRange": return `${ORDER_ICONS.upgradeRange} Upgrade range`;
+    case "defend": return `${ORDER_ICONS.defend} Defend`;
     case "parry": return `${ORDER_ICONS.parry} Parry`;
+    case "heal": return `${ORDER_ICONS.heal} Heal`;
   }
 }
 
@@ -435,34 +471,44 @@ function intent(s: GameState, order: OrderAction): PlayerAction {
   return s.config.mode === "rounds" ? { type: "order", playerId: order.playerId, order } : order;
 }
 
-/** Your own stats and the clock (and, in rounds mode, your plan), in one bar above the board. */
+/** Your own stats and the clocks (and, in rounds mode, your plan), in one bar above the board. */
 function hud(s: GameState, mine: Tank | undefined, plan: Plan): string {
   const stats = mine
     ? `<button class="hud-me" data-tank="${mine.id}" style="--c:${mine.color}" title="Open your tank's actions">
         <span class="swatch"></span>${esc(mine.name)}</button>
       <span class="stat" title="Hearts">♥ <b>${mine.hearts}</b></span>
       <span class="stat" title="Action points">⚡ <b>${mine.ap}</b> AP</span>
-      <span class="stat" title="Range">◎ <b>${mine.range}</b> range</span>`
+      <span class="stat" title="Range">◎ <b>${mine.range}</b> range</span>
+      ${mine.guard ? `<span class="stat guard" title="Guard up">${mine.guard === "parry" ? "⚔️ Parrying" : "🛡️ Defending"}</span>` : ""}
+      ${mine.stunned ? `<span class="stat stunned" title="Loses its next turn">💫 Stunned</span>` : ""}`
     : `<span class="muted">Spectating</span>`;
   const host = s.config.debug && mine?.id === s.hostId;
+  const rounds = s.config.mode === "rounds";
   let clock = "";
-  if (s.phase === "playing" && s.resolving) {
-    const current = s.resolving.done?.playerId;
-    const order = s.resolving.turnOrder
-      .map((id) => `<span class="${id === current ? "current" : ""}">${esc(s.tanks[id]?.name ?? "?")}</span>`)
-      .join(" → ");
-    clock = `<span class="clock resolving"><span class="muted small">Playing out</span> ${order}</span>`;
-  } else if (s.phase === "playing") {
-    const rounds = s.config.mode === "rounds";
-    clock = `<span class="clock"><span class="muted small">${rounds ? "Round ends in" : "Next AP in"}</span> <b id="countdown">–</b>
-      ${host ? `<button class="small" data-act="force-tick">${rounds ? "End round" : "Force tick"}</button>` : ""}</span>`;
+  if (s.phase === "playing") {
+    let roundPart = "";
+    if (rounds && s.resolving) {
+      const current = s.resolving.done?.playerId;
+      const order = s.resolving.turnOrder
+        .map((id) => `<span class="${id === current ? "current" : ""}">${esc(s.tanks[id]?.name ?? "?")}</span>`)
+        .join(" → ");
+      roundPart = `<span class="resolving"><span class="muted small">Playing out</span> ${order}</span>`;
+    } else if (rounds) {
+      roundPart = `<span><span class="muted small">Round ends in</span> <b id="round-countdown">–</b></span>`;
+    }
+    clock = `<span class="clock ${rounds ? "two" : ""}">${roundPart}
+      <span><span class="muted small">Next AP in</span> <b id="countdown">–</b></span>
+      ${host && rounds && !s.resolving ? `<button class="small" data-act="force-round">End round</button>` : ""}
+      ${host ? `<button class="small" data-act="force-tick">${rounds ? "AP now" : "Force tick"}</button>` : ""}</span>`;
   }
   const planBar = plan.planning && mine
     ? `<div class="plan-bar ${plan.order ? "has-order" : ""}">
         <span class="small muted">This round:</span>
-        ${plan.order
-          ? `<b class="small">${describeOrder(s, plan.order)}</b><button class="small" data-act="cancel">Cancel</button>`
-          : `<span class="small muted">no order yet — click a green square or a tank</span>`}
+        ${mine.stunned
+          ? `<span class="small">💫 You're stunned and sit this round out.</span>`
+          : plan.order
+            ? `<b class="small">${describeOrder(s, plan.order)}</b><button class="small" data-act="cancel">Cancel</button>`
+            : `<span class="small muted">no order yet — click a square or a tank</span>`}
       </div>`
     : "";
   return `<div class="hud">${stats}${clock}${planBar}</div>`;
@@ -477,7 +523,11 @@ function roster(s: GameState, mine: Tank | undefined): string {
     .map((id) => s.tanks[id]!)
     .sort((a, b) => Number(b.alive) - Number(a.alive))
     .map((t) => {
-      const status = turn(t.id) >= 0 ? `<span class="badge" title="Turn order this round">#${turn(t.id) + 1}</span>` : "";
+      const status = [
+        t.guard === "defense" ? `<span title="Defending">🛡️</span>` : t.guard === "parry" ? `<span title="Parrying">⚔️</span>` : "",
+        t.stunned ? `<span title="Stunned">💫</span>` : "",
+        turn(t.id) >= 0 ? `<span class="badge" title="Turn order this round">#${turn(t.id) + 1}</span>` : "",
+      ].join("");
       return `
       <button class="tank-chip ${t.alive ? "" : "dead"} ${t.id === ui.targetId ? "targeted" : ""}" data-tank="${t.id}" style="--c:${t.color}"
         title="${esc(tankTitle(t))}">
@@ -489,58 +539,98 @@ function roster(s: GameState, mine: Tank | undefined): string {
   return `<div class="roster" aria-label="${livingTanks(s).length} tanks alive">${chips}</div>`;
 }
 
+/** Can you act (or plan) right now? */
+function canActNow(s: GameState, mine: Tank | undefined): mine is Tank {
+  return !!mine?.alive && s.phase === "playing" && !(s.config.mode === "rounds" && s.resolving);
+}
+
 /** The menu that opens over a clicked tank: what you can do to (or with) it right now. */
 function popover(s: GameState, mine: Tank | undefined, plan: Plan, t: Tank): string {
   const isMe = t.id === mine?.id;
   const dist = mine && !isMe ? distance(mine, t) : null;
   const bot = ui.msg?.bots[t.id];
   const rounds = s.config.mode === "rounds";
+  const button = (act: string, action: PlayerAction, label: string, cls = "") =>
+    `<button class="${cls}" data-act="${act}" ${canApply(s, action) ? "" : "disabled"}>${label}</button>`;
   let actions = "";
   if (mine && s.phase === "playing") {
     if (rounds && s.resolving && mine.alive) {
       actions = `<p class="muted small">This round is playing out — you can plan again in a moment.</p>`;
     } else if (isMe && mine.alive) {
-      const upgrade = intent(s, { type: "upgradeRange", playerId: mine.id });
-      const parry = intent(s, { type: "parry", playerId: mine.id });
+      const id = mine.id;
       actions = `
         <div class="actions">
-          <button class="primary" data-act="upgrade" ${canApply(s, upgrade) ? "" : "disabled"}>⬆ ${rounds ? "Plan: upgrade" : "Upgrade"} range (${s.config.upgradeRangeCost} AP)</button>
-          <button data-act="parry" ${canApply(s, parry) ? "" : "disabled"}>🛡️ ${mine.parrying ? "Parrying" : rounds ? "Plan a parry" : "Parry"} (${PARRY_COST} AP)</button>
+          ${button("upgrade", intent(s, { type: "upgradeRange", playerId: id }), `⬆ Upgrade range (${s.config.upgradeRangeCost} AP)`, "primary")}
+          ${s.config.allowHeal ? button("heal", intent(s, { type: "heal", playerId: id }), `➕ Heal 1 ♥ (${s.config.healCost} AP)`) : ""}
+          ${button("defend", intent(s, { type: "defend", playerId: id }), `🛡️ Defend (${DEFENSE_COST} AP)`)}
+          ${button("parry", intent(s, { type: "parry", playerId: id }), `⚔️ Parry (${PARRY_COST} AP)`)}
         </div>
-        <p class="muted small">Parry: shots at you ${rounds ? "this round" : "until the next tick"} do no damage, and each shooter loses ${PARRY_COST} AP to you${rounds ? " — if you guessed right" : ""}.</p>`;
+        <p class="muted small">🛡️ Defend: shots at you ${rounds ? "this round" : "until the next tick"} do no damage.
+          ⚔️ Parry: the same, and each shooter loses ${s.config.parrySteal} AP to you${s.config.parryStuns ? " and its next turn" : ""}${s.config.parryDamage ? ` and ${s.config.parryDamage} ♥` : ""}.
+          ${rounds ? "Both are secret guesses until the round plays out." : ""}</p>
+        ${mine.stunned ? `<p class="small">💫 You're stunned ${rounds ? "and sit this round out" : "until the next tick"}.</p>` : ""}`;
     } else if (isMe && s.juryVotes[mine.id]) {
       actions = `<p class="small">Your jury vote: <b>${esc(s.tanks[s.juryVotes[mine.id]!]?.name ?? "?")}</b></p>`;
     } else if (!isMe && mine.alive) {
-      const shoot = intent(s, { type: "shoot", playerId: mine.id, targetId: t.id });
+      const shoot = intent(s, { type: "shoot", playerId: mine.id, x: t.x, y: t.y });
       const ap = intent(s, { type: "giveAP", playerId: mine.id, targetId: t.id });
       const heart = intent(s, { type: "giveHeart", playerId: mine.id, targetId: t.id });
       actions = `
         <div class="actions">
-          ${t.alive ? `<button class="danger" data-act="shoot" ${canApply(s, shoot) ? "" : "disabled"}>💥 ${rounds ? "Plan a shot" : "Shoot"} (1 AP)</button>` : ""}
-          ${t.alive ? `<button data-act="giveAP" ${canApply(s, ap) ? "" : "disabled"}>⚡ Give 1 AP</button>` : ""}
-          ${s.config.allowGiveHeart ? `<button data-act="giveHeart" ${canApply(s, heart) ? "" : "disabled"}>♥ ${t.alive ? "Give a heart" : "Revive with a heart"}</button>` : ""}
+          ${t.alive ? button("shoot", shoot, `💥 Shoot ${coord(t)} (1 AP)`, "danger") : ""}
+          ${t.alive ? button("giveAP", ap, "⚡ Give 1 AP") : ""}
+          ${s.config.allowGiveHeart ? button("giveHeart", heart, `♥ ${t.alive ? "Give a heart" : "Revive with a heart"}`) : ""}
         </div>
         ${dist !== null && dist > mine.range ? `<p class="muted small">Out of range: ${dist} away, your range is ${mine.range}.</p>` : ""}
-        ${plan.planning ? `<p class="muted small">This becomes your order for the round${plan.order ? ", replacing the current one" : ""}. It happens when the round ends — if ${esc(t.name)} is still in range by your turn.</p>` : ""}`;
+        ${t.guard ? `<p class="muted small">${t.guard === "parry" ? "⚔️ Parrying" : "🛡️ Defending"} — a shot now would be wasted${t.guard === "parry" ? " and punished" : ""}.</p>` : ""}
+        ${plan.planning ? `<p class="muted small">This becomes your order for the round${plan.order ? ", replacing the current one" : ""}. The shot hits whoever is on ${coord(t)} when your turn comes — if ${esc(t.name)} moves off it first, you miss.</p>` : ""}`;
     } else if (!isMe && t.alive) {
       const voted = s.juryVotes[mine.id] === t.id;
       actions = `<div class="actions"><button data-act="vote" ${voted ? "disabled" : ""}>${voted ? "Voted ✓" : "🗳️ Jury vote for this tank"}</button></div>`;
     }
   }
+  const status = [
+    t.guard === "defense" ? "🛡️ defending" : t.guard === "parry" ? "⚔️ parrying" : "",
+    t.stunned ? "💫 stunned" : "",
+  ].filter(Boolean).join(" · ");
   return `
     <div class="pop-head"><span class="swatch"></span><b>${esc(t.name)}</b>${isMe ? ` <span class="muted small">(you)</span>` : ""}
       ${bot ? `<span class="badge">🤖 ${bot}</span>` : ""}${t.alive ? "" : `<span class="badge">destroyed</span>`}
       <button class="link small" data-act="untarget" aria-label="Close">✕</button></div>
-    <div class="pop-stats">♥ ${t.hearts} · ⚡ ${t.ap} AP · ◎ range ${t.range}${dist !== null ? ` · ${dist} away` : ""}
+    <div class="pop-stats">♥ ${t.hearts} · ⚡ ${t.ap} AP · ◎ range ${t.range}${dist !== null ? ` · ${dist} away` : ""}${status ? ` · ${status}` : ""}
       ${plan.order && plan.marks.get(t.id) ? `<br />Your order: ${describeOrder(s, plan.order)}` : ""}</div>
     ${actions}
     ${mine && !isMe && !bot ? `<button class="small dm" data-act="dm">✉️ Message privately</button>` : ""}`;
 }
 
-/** Pin the tank menu just above its tank (or below, near the top of the screen), inside the viewport. */
+/** The menu for an empty square (or a wreck's): fire at it, or drive onto it if it's next door. */
+function squarePopover(s: GameState, mine: Tank | undefined, plan: Plan, sq: Position): string {
+  const wreck = tankAt(s, sq);
+  let actions = `<p class="muted small">Join the game to act.</p>`;
+  if (canActNow(s, mine)) {
+    const shoot = intent(s, { type: "shoot", playerId: mine.id, x: sq.x, y: sq.y });
+    const step = intent(s, move(mine, sq.x, sq.y));
+    const adjacent = distance(mine, sq) === 1 && !wreck;
+    actions = `
+      <div class="actions">
+        ${adjacent ? `<button class="primary" data-act="move-here" ${canApply(s, step) ? "" : "disabled"}>➜ Move here (1 AP)</button>` : ""}
+        <button class="danger" data-act="shoot-here" ${canApply(s, shoot) ? "" : "disabled"}>💥 Shoot ${coord(sq)} (1 AP)</button>
+      </div>
+      ${distance(mine, sq) > mine.range ? `<p class="muted small">Out of range: ${distance(mine, sq)} away, your range is ${mine.range}.</p>` : ""}
+      <p class="muted small">A shot hits whoever is on this square when it lands${plan.planning ? " — aim where you think a tank will be when your turn comes" : ""}. If nobody is, it misses (the AP is still spent).</p>`;
+  }
+  return `
+    <div class="pop-head"><b>Square ${coord(sq)}</b>${wreck ? ` <span class="badge">${esc(wreck.name)}'s wreck</span>` : ""}
+      <button class="link small" data-act="untarget" aria-label="Close">✕</button></div>
+    ${actions}`;
+}
+
+/** Pin the open menu just above its square (or below, near the top of the screen), inside the viewport. */
 function placePopover(): void {
   const pop = document.getElementById("popover");
-  const cell = ui.targetId ? app.querySelector<HTMLElement>(`.cell[data-tank="${ui.targetId}"]`) : null;
+  const cell = ui.targetId
+    ? app.querySelector<HTMLElement>(`.cell[data-tank="${ui.targetId}"]`)
+    : ui.square ? app.querySelector<HTMLElement>(`.cell[data-x="${ui.square.x}"][data-y="${ui.square.y}"]`) : null;
   if (!pop || !cell) return;
   const r = cell.getBoundingClientRect();
   const { width, height } = pop.getBoundingClientRect();
@@ -552,26 +642,43 @@ function placePopover(): void {
 addEventListener("resize", placePopover);
 addEventListener("scroll", placePopover, true);
 
+/** Highlight every square the hovered tank can reach (its range). */
+function paintHover(): void {
+  for (const el of app.querySelectorAll(".cell.hover-range, .cell.hover-origin")) el.classList.remove("hover-range", "hover-origin");
+  const t = ui.hoverId ? ui.msg?.state.tanks[ui.hoverId] : undefined;
+  const board = app.querySelector<HTMLElement>(".board");
+  if (!t?.alive || !board) return;
+  board.style.setProperty("--hc", t.color);
+  for (const cell of board.querySelectorAll<HTMLElement>(".cell")) {
+    const d = distance(t, { x: Number(cell.dataset.x), y: Number(cell.dataset.y) });
+    if (d === 0) cell.classList.add("hover-origin");
+    else if (d <= t.range) cell.classList.add("hover-range");
+  }
+}
+
 function cellHtml(s: GameState, mine: Tank | undefined, plan: Plan, x: number, y: number): string {
   const t = tankAt(s, { x, y });
+  const key = `${x},${y}`;
   const cls = ["cell"];
   let data = `data-x="${x}" data-y="${y}"`;
-  const canAct = mine?.alive && s.phase === "playing" && !(s.config.mode === "rounds" && s.resolving);
-  if (mine && canAct) {
+  if (canActNow(s, mine)) {
     const d = distance(mine, { x, y });
-    if (d <= mine.range) cls.push("in-range");
+    if (d <= mine.range && d > 0) cls.push("in-range");
     if (d === 1 && !t && canApply(s, intent(s, move(mine, x, y)))) cls.push("can-move");
   }
   if (s.pickups.some((p) => p.x === x && p.y === y)) cls.push("pickup");
-  const planned = plan.moveTo === `${x},${y}`;
+  const planned = plan.moveTo === key;
   if (planned) cls.push("planned");
+  if (plan.aim === key) cls.push("aimed");
+  if (ui.square && ui.square.x === x && ui.square.y === y) cls.push("targeted");
   if (t) {
     cls.push("has-tank");
     if (t.id === ui.targetId) cls.push("targeted");
     data += ` data-tank="${t.id}"`;
   }
+  const guard = t?.guard === "defense" ? "guard-defense" : t?.guard === "parry" ? "guard-parry" : "";
   let inner = t
-    ? `<div class="tank ${t.alive ? "" : "wreck"} ${t.id === mine?.id ? "mine" : ""} ${t.parrying ? "parrying" : ""}" style="--c:${t.color}" title="${esc(tankTitle(t))}">
+    ? `<div class="tank ${t.alive ? "" : "wreck"} ${t.id === mine?.id ? "mine" : ""} ${guard} ${t.stunned ? "stunned" : ""}" style="--c:${t.color}" title="${esc(tankTitle(t))}">
         <span class="initials">${esc(initials(t.name))}</span>
         <span class="hp">${t.alive ? "♥".repeat(Math.min(t.hearts, 5)) + (t.hearts > 5 ? "+" : "") : "✖"}</span>
       </div>`
@@ -580,6 +687,7 @@ function cellHtml(s: GameState, mine: Tank | undefined, plan: Plan, x: number, y
   if (planned && mine && !t) {
     inner = `<div class="tank ghost" style="--c:${mine.color}" title="Your planned move"><span class="initials">${esc(initials(mine.name))}</span></div>`;
   }
+  if (plan.aim === key) inner += `<span class="aim-mark" title="Your planned shot lands here">🎯</span>`;
   const mark = t ? plan.marks.get(t.id) : undefined;
   if (mark) inner += `<span class="order-mark" title="Your order for this round">${mark}</span>`;
   return `<div class="${cls.join(" ")}" ${data}>${inner}</div>`;
@@ -644,6 +752,7 @@ app.addEventListener("click", (e) => {
   const chip = el.closest<HTMLElement>("button[data-tank]");
   if (chip) {
     ui.targetId = ui.targetId === chip.dataset.tank ? null : (chip.dataset.tank ?? null);
+    ui.square = null;
     renderGame();
   }
 });
@@ -701,8 +810,9 @@ document.addEventListener("keydown", (e) => {
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   const s = ui.msg?.state;
   const mine = s && me(s);
-  if (e.key === "Escape" && ui.targetId) {
+  if (e.key === "Escape" && (ui.targetId || ui.square)) {
     ui.targetId = null;
+    ui.square = null;
     renderGame();
     return;
   }
@@ -712,24 +822,52 @@ document.addEventListener("keydown", (e) => {
   void send(intent(s, { type: "move", playerId: mine.id, dx: dir[0], dy: dir[1] }));
 });
 
-function onCell(x: number, y: number, tankId: string | undefined): void {
+/**
+ * A click on the board: a tank opens its menu; a free square next to you is a move; any other
+ * square in range opens its menu (to shoot it). `menu` (right-click) always opens a square's menu.
+ */
+function onCell(x: number, y: number, tankId: string | undefined, menu = false): void {
   const s = ui.msg?.state;
   if (!s || s.phase === "lobby") return;
   const mine = me(s);
-  if (tankId) {
-    ui.targetId = ui.targetId === tankId ? null : tankId;
-    renderGame();
-    return;
+  const sameSquare = ui.square?.x === x && ui.square?.y === y;
+  ui.square = null;
+  const tank = tankId ? s.tanks[tankId] : undefined;
+  if (tank && (tank.alive || !menu)) {
+    ui.targetId = ui.targetId === tankId ? null : tankId!;
+    return renderGame();
   }
-  if (mine?.alive && distance(mine, { x, y }) === 1) {
-    void send(intent(s, move(mine, x, y)));
-    return;
+  ui.targetId = null;
+  if (canActNow(s, mine)) {
+    const d = distance(mine, { x, y });
+    if (!menu && d === 1 && !tank) {
+      void send(intent(s, move(mine, x, y)));
+      return renderGame();
+    }
+    if (d > 0 && (menu || d <= mine.range) && !sameSquare) ui.square = { x, y };
   }
-  if (ui.targetId) {
-    ui.targetId = null;
-    renderGame();
-  }
+  renderGame();
 }
+
+// Right-click a square for its menu (to fire at a square you could also drive onto).
+app.addEventListener("contextmenu", (e) => {
+  const cell = (e.target as HTMLElement).closest<HTMLElement>(".cell");
+  if (!cell) return;
+  e.preventDefault();
+  onCell(Number(cell.dataset.x), Number(cell.dataset.y), cell.dataset.tank, true);
+});
+
+// Hovering a tank (on the board, in the list under it, or your name in the bar) shows its range.
+app.addEventListener("mouseover", (e) => {
+  const id = (e.target as HTMLElement).closest<HTMLElement>("[data-tank]")?.dataset.tank ?? null;
+  if (id === ui.hoverId) return;
+  ui.hoverId = id;
+  paintHover();
+});
+app.addEventListener("mouseleave", () => {
+  ui.hoverId = null;
+  paintHover();
+});
 
 async function onButton(act: string, button: HTMLButtonElement): Promise<void> {
   const s = ui.msg?.state;
@@ -743,8 +881,8 @@ async function onButton(act: string, button: HTMLButtonElement): Promise<void> {
       if (ui.session && kind) await guard(() => api.addBot(ui.session!, kind));
       return;
     }
-    case "remove-bot":
-      if (ui.session && button.dataset.id) await guard(() => api.removeBot(ui.session!, button.dataset.id!));
+    case "kick":
+      if (ui.session && button.dataset.id) await guard(() => api.act(ui.session!, { type: "kick", playerId: ui.session!.playerId, targetId: button.dataset.id! }));
       return;
     case "dm": {
       const to = document.getElementById("chat-to") as HTMLSelectElement | null;
@@ -766,19 +904,29 @@ async function onButton(act: string, button: HTMLButtonElement): Promise<void> {
     }
     case "untarget":
       ui.targetId = null;
+      ui.square = null;
       return renderGame();
     case "force-tick":
       if (ui.session) await guard(() => api.forceTick(ui.session!));
       return;
+    case "force-round":
+      if (ui.session) await guard(() => api.forceRound(ui.session!));
+      return;
   }
   if (!mine || !s) return;
   const id = mine.id;
+  const aimed = s.tanks[target] ?? { x: -1, y: -1 }; // "Shoot" in a tank's menu fires at its square
+  const sq = ui.square ?? { x: -1, y: -1 };
   const actions: Record<string, PlayerAction> = {
     start: { type: "start", playerId: id, now: 0 },
     leave: { type: "leave", playerId: id },
     upgrade: intent(s, { type: "upgradeRange", playerId: id }),
+    heal: intent(s, { type: "heal", playerId: id }),
+    defend: intent(s, { type: "defend", playerId: id }),
     parry: intent(s, { type: "parry", playerId: id }),
-    shoot: intent(s, { type: "shoot", playerId: id, targetId: target }),
+    shoot: intent(s, { type: "shoot", playerId: id, x: aimed.x, y: aimed.y }),
+    "shoot-here": intent(s, { type: "shoot", playerId: id, x: sq.x, y: sq.y }),
+    "move-here": intent(s, move(mine, sq.x, sq.y)),
     giveAP: intent(s, { type: "giveAP", playerId: id, targetId: target }),
     giveHeart: intent(s, { type: "giveHeart", playerId: id, targetId: target }),
     vote: { type: "juryVote", playerId: id, targetId: target },
@@ -788,6 +936,10 @@ async function onButton(act: string, button: HTMLButtonElement): Promise<void> {
   const action = actions[act];
   if (!action) return;
   const sent = await send(action);
+  if (sent && (act === "shoot-here" || act === "move-here")) {
+    ui.square = null;
+    renderGame();
+  }
   if (sent && act === "leave" && ui.session) {
     clearSession(ui.session.gameId);
     ui.session = null;
@@ -837,10 +989,13 @@ function move(from: Tank, x: number, y: number): OrderAction {
 }
 
 function updateCountdown(): void {
-  const el = document.getElementById("countdown");
-  const next = ui.msg?.state.nextTickAt;
-  if (!el || !next) return;
-  el.textContent = fmtDuration(Math.max(0, next - (Date.now() + ui.clockOffset)), true);
+  const s = ui.msg?.state;
+  const show = (id: string, at: number | null | undefined) => {
+    const el = document.getElementById(id);
+    if (el && at) el.textContent = fmtDuration(Math.max(0, at - (Date.now() + ui.clockOffset)), true);
+  };
+  show("countdown", s?.nextTickAt); // the AP clock
+  show("round-countdown", s?.nextRoundAt); // rounds mode: the round clock
 }
 setInterval(updateCountdown, 500);
 
@@ -866,6 +1021,11 @@ function fmtTime(at: number): string {
   return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+/** A square's name, like "D4". */
+function coord(p: Position): string {
+  return `${colName(p.x)}${p.y + 1}`;
+}
+
 function colName(x: number): string {
   return x < 26 ? String.fromCharCode(65 + x) : `${String.fromCharCode(64 + Math.floor(x / 26))}${String.fromCharCode(65 + (x % 26))}`;
 }
@@ -876,7 +1036,8 @@ function initials(name: string): string {
 }
 
 function tankTitle(t: Tank): string {
-  return `${t.name}${t.alive ? "" : " (destroyed)"} — ${t.hearts} hearts, ${t.ap} AP, range ${t.range}${t.parrying ? ", parrying" : ""}`;
+  const extra = [t.guard === "defense" ? "defending" : t.guard === "parry" ? "parrying" : "", t.stunned ? "stunned" : ""].filter(Boolean);
+  return `${t.name}${t.alive ? "" : " (destroyed)"} — ${t.hearts} hearts, ${t.ap} AP, range ${t.range}${extra.length ? `, ${extra.join(", ")}` : ""}`;
 }
 
 function esc(s: string): string {
