@@ -18,9 +18,11 @@ cd ttt
 npm run dev
 ```
 
-Open <http://localhost:3000> and click **Practice vs bots** to jump straight into a Quick game against three
-bots. Or create a game, add bots from the lobby, and open the share link in private/incognito windows to join
-as other players. In Quick games the host has a **Force tick** button so you don't have to wait for AP.
+Open <http://localhost:3000> and click **Practice vs bots** to jump straight into a **Rounds** game against
+three bots: every 10 seconds each tank's one secret order plays out, in a random order (see
+[RULES.md](RULES.md)). Or create a game, add bots from the lobby, and open the share link in private/incognito
+windows to join as other players. The **Quick** pace is real time instead, and its host has a **Force tick**
+button so you don't have to wait for AP.
 
 Every game has a text chat: messages to **Everyone**, or private messages to one player (pick them in the
 chat's recipient menu, or click their tank and hit **Message privately**) for secret deals.
@@ -75,7 +77,7 @@ and buttons to enable, so the UI and the server always agree on what's legal.
 
 ## Playtesting with friends
 
-Matches are meant to be short — one sitting, Quick pace — so nothing needs to survive a restart.
+Matches are meant to be short — one sitting, Rounds or Quick pace — so nothing needs to survive a restart.
 
 **The website (Render, free):** `render.yaml` describes the service. One-time setup:
 

@@ -197,6 +197,52 @@ describe("bots", () => {
   });
 });
 
+describe("rounds mode", () => {
+  it("ends the round on the timer, then plays the orders out step by step", async () => {
+    const host = (await api("/api/games", { name: "Ana", preset: "rounds", config: { startingAP: 2 } })).json;
+    const { gameId } = host;
+    const guest = (await api(`/api/games/${gameId}/join`, { name: "Bia" })).json;
+    const act = (who: { token: string }, action: unknown) => api(`/api/games/${gameId}/actions`, { token: who.token, action });
+    await act(host, { type: "start" });
+    const s = store.get(gameId)!;
+    // Put the tanks somewhere known, in range of each other.
+    Object.assign(s.tanks[host.playerId]!, { x: 0, y: 0 });
+    Object.assign(s.tanks[guest.playerId]!, { x: 2, y: 0 });
+
+    assert.equal((await act(host, { type: "order", order: { type: "shoot", targetId: guest.playerId } })).status, 200);
+    assert.equal((await act(guest, { type: "order", order: { type: "upgradeRange" } })).status, 400, "not enough AP");
+    // The guest can't see the host's order.
+    const guestView = (await api(`/api/games/${gameId}?token=${guest.token}`)).json as StateMessage;
+    assert.deepEqual(guestView.state.orders, {});
+
+    store.runDueTicks();
+    assert.equal(store.get(gameId)!.resolving, null, "the round's timer hasn't run out");
+    clock += 10_000;
+    store.runDueTicks(); // timer: the round starts playing out
+    assert.ok(store.get(gameId)!.resolving);
+    store.runDueTicks(); // the shot
+    assert.equal(store.get(gameId)!.tanks[guest.playerId]!.hearts, 2);
+    store.runDueTicks(); // too soon for the next step
+    assert.ok(store.get(gameId)!.resolving);
+    clock += 1000;
+    store.runDueTicks(); // round over: AP income
+    assert.equal(store.get(gameId)!.resolving, null);
+    assert.equal(store.get(gameId)!.tick, 1);
+  });
+
+  it("has bots plan an order for the round", async () => {
+    const host = (await api("/api/games", { name: "Ana", preset: "rounds", config: { startingAP: 5 }, bots: ["hunter", "turtle"] })).json;
+    await api(`/api/games/${host.gameId}/actions`, { token: host.token, action: { type: "start" } });
+    store.runBots(); // schedules their thinking
+    clock += 5000;
+    store.runBots();
+    const s = store.get(host.gameId)!;
+    const bots = Object.keys(store.botsOf(host.gameId));
+    assert.ok(bots.some((id) => s.orders[id]), "at least one bot has planned something");
+    assert.equal(s.resolving, null, "bots don't end the round early");
+  });
+});
+
 describe("static files", () => {
   it("serves the client and strips TypeScript types", async () => {
     const html = await fetch(`${base}/`);

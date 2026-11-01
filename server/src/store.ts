@@ -5,7 +5,7 @@ import { randomBytes, randomInt } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MAX_PLAYERS, PRESETS } from "../../shared/src/config.ts";
-import { applyAction, createGame } from "../../shared/src/rules.ts";
+import { applyAction, createGame, isOrder } from "../../shared/src/rules.ts";
 import type { Action, GameConfig, GameState, PlayerAction } from "../../shared/src/types.ts";
 import { BOT_PERSONALITIES, chatFor, type BotPersonality, type ChatMessage, type LobbySummary } from "../../shared/src/view.ts";
 import { botName, chooseBotAction } from "./bots.ts";
@@ -195,6 +195,8 @@ export class GameStore {
       // The rules hand the host role to the next player in line — never let that be a bot.
       if (game.bots[game.state.hostId]) game.state = { ...game.state, hostId: humans[0]! };
     }
+    // Bots start the new match with a fresh "don't pounce at the start" delay.
+    if (action.type === "rematch") for (const botId of Object.keys(game.bots)) this.botNextAt.delete(`${game.state.id}:${botId}`);
     this.commit(game.state.id, stamped);
     return { ok: true, value: game.state };
   }
@@ -205,36 +207,31 @@ export class GameStore {
     if (!game) return fail("Game not found.", 404);
     if (game.tokens[token] !== game.state.hostId) return fail("Only the host can do that.", 403);
     if (!game.state.config.debug) return fail("Debug mode is off for this game.", 403);
-    const tick: Action = { type: "tick", now: this.now() };
-    const result = applyAction(game.state, tick);
-    if (!result.ok) return fail(result.error);
-    game.state = result.state;
-    this.commit(game.state.id, tick);
-    return { ok: true, value: game.state };
+    return this.tick(game) ?? { ok: true, value: game.state };
   }
 
-  /** Run any ticks that are due. Called every second by the server. */
+  /** Run any ticks — and, in rounds mode, resolution steps — that are due. Called by the server's timer. */
   runDueTicks(): void {
     const now = this.now();
     for (const game of this.games.values()) {
-      if (game.state.phase !== "playing" || game.state.nextTickAt === null) continue;
-      if (game.state.nextTickAt > now) continue;
-      const tick: Action = { type: "tick", now };
-      const result = applyAction(game.state, tick);
-      if (result.ok) {
-        game.state = result.state;
-        this.commit(game.state.id, tick);
+      const s = game.state;
+      if (s.phase !== "playing") continue;
+      if (s.resolving) {
+        if (s.resolving.nextAt <= now) this.resolveStep(game);
+      } else if (s.nextTickAt !== null && s.nextTickAt <= now) {
+        this.tick(game);
       }
     }
   }
 
-  /** Let every bot whose thinking time is up take one action. Called every second by the server. */
+  /** Let every bot whose thinking time is up take one action (or plan its round). Called by the server's timer. */
   runBots(): void {
     const now = this.now();
     const [minThink, maxThink] = BOT_THINK_MS;
     const think = () => now + minThink + this.random() * (maxThink - minThink);
     for (const game of this.games.values()) {
       if (game.state.phase !== "playing") continue;
+      const rounds = game.state.config.mode === "rounds";
       for (const [botId, personality] of Object.entries(game.bots)) {
         const key = `${game.state.id}:${botId}`;
         const due = this.botNextAt.get(key);
@@ -244,6 +241,10 @@ export class GameStore {
         }
         if (due > now) continue;
         this.botNextAt.set(key, think());
+        if (rounds) {
+          this.planBotRound(game, botId, personality);
+          continue;
+        }
         const action = chooseBotAction(game.state, botId, personality, this.random);
         if (!action) continue;
         const result = applyAction(game.state, action);
@@ -270,6 +271,46 @@ export class GameStore {
     if (!game) return;
     this.save(game);
     for (const listener of this.listeners.get(gameId) ?? []) listener(game.state, cause);
+  }
+
+  /** The tick: real-time AP income, or (rounds mode) the end of planning. Returns an error, if any. */
+  private tick(game: StoredGame): Outcome<never> | null {
+    const now = this.now();
+    const result = applyAction(game.state, { type: "tick", now });
+    if (!result.ok) return fail(result.error);
+    game.state = result.state;
+    // A round that starts playing out has nothing to animate yet; a plain tick pays AP.
+    this.commit(game.state.id, game.state.resolving ? null : { type: "tick", now });
+    return null;
+  }
+
+  /** Rounds mode: play out the next order (or, once all have played, the tick that ends the round). */
+  private resolveStep(game: StoredGame): void {
+    const now = this.now();
+    const result = applyAction(game.state, { type: "resolveStep", now });
+    if (!result.ok) return;
+    game.state = result.state;
+    const r = game.state.resolving;
+    this.commit(game.state.id, r ? r.done : { type: "tick", now });
+  }
+
+  /**
+   * Rounds mode: a bot (re)picks its one order for the round from the board as it stands, each
+   * time it has thought it over. If it can't decide, it keeps the order it already has.
+   */
+  private planBotRound(game: StoredGame, botId: string, personality: BotPersonality): void {
+    const s = game.state;
+    if (s.resolving || !s.tanks[botId]) return;
+    // Bots think in real-time terms: "what would I do right now?" becomes this round's order.
+    const asRealtime: GameState = { ...s, config: { ...s.config, mode: "realtime" } };
+    const choice = chooseBotAction(asRealtime, botId, personality, this.random);
+    if (!choice) return;
+    const action: Action = isOrder(choice) ? { type: "order", playerId: botId, order: choice } : choice; // dead: jury vote
+    if (action.type === "order" && JSON.stringify(s.orders[botId]) === JSON.stringify(choice)) return;
+    const result = applyAction(s, action);
+    if (!result.ok) return;
+    game.state = result.state;
+    this.commit(s.id, action); // orders and votes are secret: publicCause hides them
   }
 
   private hostGame(gameId: string, token: string): Outcome<StoredGame> {
@@ -314,6 +355,10 @@ export class GameStore {
         const game = JSON.parse(readFileSync(join(this.dataDir, name), "utf8")) as StoredGame;
         game.bots ??= {}; // saved before bots and chat existed
         game.chat ??= [];
+        game.state.config.mode ??= "realtime"; // saved before rounds mode existed
+        game.state.orders ??= {};
+        game.state.resolving ??= null;
+        game.state.autoSize ??= false; // saved before rematches existed
         this.games.set(game.state.id, game);
       } catch (e) {
         console.warn(`Skipping unreadable game file ${name}:`, e);

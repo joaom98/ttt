@@ -2,14 +2,21 @@ import type { Action, GameState } from "./types.ts";
 
 /**
  * What a given player is allowed to see. Everything on the board is public (that's the game!),
- * but jury votes stay secret until the tick: each viewer only sees their own vote.
+ * but jury votes stay secret until the tick and planned orders stay secret until they play out:
+ * each viewer only sees their own. The round's turn order is public.
  */
 export function viewFor(state: GameState, viewerId: string | null): GameState {
-  const ownVote = viewerId ? state.juryVotes[viewerId] : undefined;
+  const own = <T>(byPlayer: Record<string, T>): Record<string, T> =>
+    viewerId && byPlayer[viewerId] !== undefined ? { [viewerId]: byPlayer[viewerId] } : {};
   return {
     ...state,
     rng: 0,
-    juryVotes: viewerId && ownVote ? { [viewerId]: ownVote } : {},
+    juryVotes: own(state.juryVotes),
+    orders: own(state.orders),
+    resolving: state.resolving && {
+      ...state.resolving,
+      queue: state.resolving.queue.filter((o) => o.playerId === viewerId),
+    },
   };
 }
 
@@ -39,9 +46,11 @@ export interface StateMessage {
   cause: Action | null;
 }
 
-/** The action behind an update as everyone may see it: jury votes stay secret. */
+const SECRET_CAUSES = new Set<string>(["juryVote", "order", "cancelOrder"]);
+
+/** The action behind an update as everyone may see it: jury votes and planning stay secret. */
 export function publicCause(cause: Action | null): Action | null {
-  return cause && cause.type !== "juryVote" ? cause : null;
+  return cause && !SECRET_CAUSES.has(cause.type) ? cause : null;
 }
 
 /** Chat lines a given player is allowed to read. */

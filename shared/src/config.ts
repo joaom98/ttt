@@ -5,6 +5,7 @@ const HOUR = 60 * 60 * SECOND;
 
 /** Rules as close to the original Halfbrick prototype as we know them. */
 export const DEFAULT_CONFIG: GameConfig = {
+  mode: "realtime",
   width: 0,
   height: 0,
   startingHearts: 3,
@@ -23,6 +24,10 @@ export const DEFAULT_CONFIG: GameConfig = {
 
 /** Named starting points shown in the "create game" screen. Tweak freely while iterating. */
 export const PRESETS: Record<string, { label: string; config: Partial<GameConfig> }> = {
+  rounds: {
+    label: "Rounds — one secret order every 10s, resolved in random order",
+    config: { mode: "rounds", tickIntervalMs: 10 * SECOND, startingAP: 1 },
+  },
   classic: { label: "Classic — 1 AP every 24h", config: {} },
   evening: { label: "Evening — 1 AP every 10 min", config: { tickIntervalMs: 10 * 60 * SECOND } },
   quick: {
@@ -36,6 +41,11 @@ export const TANK_COLORS = [
   "#46f0f0", "#f032e6", "#bcf60c", "#fabebe", "#008080", "#e6beff",
   "#9a6324", "#fffac8", "#800000", "#aaffc3", "#808000", "#ffd8b1",
 ];
+
+/** The preset picked by default and used for practice games. */
+export const DEFAULT_PRESET = "rounds";
+/** Rounds mode: pause between resolution steps, so everyone can follow (and animate) each order. */
+export const RESOLVE_STEP_MS = 700;
 
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 24;
@@ -54,6 +64,7 @@ export function makeConfig(overrides: Partial<GameConfig> = {}): GameConfig {
     if (v === undefined || typeof v !== typeof DEFAULT_CONFIG[key]) continue;
     (c as unknown as Record<string, unknown>)[key] = v;
   }
+  if (c.mode !== "realtime" && c.mode !== "rounds") c.mode = DEFAULT_CONFIG.mode;
   const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.floor(n)));
   c.width = c.width === 0 ? 0 : clamp(c.width, 5, 60);
   c.height = c.height === 0 ? 0 : clamp(c.height, 5, 60);

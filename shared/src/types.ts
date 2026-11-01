@@ -1,7 +1,15 @@
 // Core data types shared by the server (authoritative) and the client (rendering + previews).
 // Everything here is plain JSON so it can be sent over the wire and saved to disk as-is.
 
+/**
+ * "realtime": act whenever you have AP.
+ * "rounds": each tick, plan one hidden order; when the tick ends the orders resolve one player at
+ * a time, in a random order, so reaction speed doesn't matter.
+ */
+export type Mode = "realtime" | "rounds";
+
 export interface GameConfig {
+  mode: Mode;
   /** Board size. 0 means "pick automatically from the player count when the game starts". */
   width: number;
   height: number;
@@ -70,26 +78,51 @@ export interface GameState {
   nextTickAt: number | null;
   /** Jury votes for the current tick: dead voter id -> living target id. */
   juryVotes: Record<string, string>;
+  /** Rounds mode: each player's one planned order for this round (secret — see view.ts). */
+  orders: Record<string, OrderAction>;
+  /** Rounds mode: the round being played out, step by step. Null while planning. */
+  resolving: Resolution | null;
   winnerId: string | null;
+  /** The board size was picked from the player count at the start, so a rematch picks it again. */
+  autoSize: boolean;
   /** Seeded RNG state so the reducer stays pure and replayable. */
   rng: number;
   log: LogEntry[];
   createdAt: number;
 }
 
-export type Action =
-  | { type: "join"; playerId: string; name: string }
-  | { type: "leave"; playerId: string }
-  | { type: "start"; playerId: string; now: number }
+/** The things a tank does with its AP. In rounds mode these are queued as orders. */
+export type OrderAction =
   | { type: "move"; playerId: string; dx: number; dy: number }
   | { type: "shoot"; playerId: string; targetId: string }
   | { type: "giveAP"; playerId: string; targetId: string }
   | { type: "giveHeart"; playerId: string; targetId: string }
-  | { type: "upgradeRange"; playerId: string }
-  | { type: "juryVote"; playerId: string; targetId: string }
-  | { type: "tick"; now: number };
+  | { type: "upgradeRange"; playerId: string };
 
-/** Actions a player can send. "tick" is only ever issued by the server. */
-export type PlayerAction = Exclude<Action, { type: "tick" }>;
+export interface Resolution {
+  /** The shuffled order players act in this round (only players who planned something). */
+  turnOrder: string[];
+  /** Orders still to play out, in turn order (one per player). */
+  queue: OrderAction[];
+  /** Epoch ms when the next step may run. */
+  nextAt: number;
+  /** The order carried out by the latest step (null if it was skipped), so clients can animate it. */
+  done: OrderAction | null;
+}
+
+export type Action =
+  | { type: "join"; playerId: string; name: string }
+  | { type: "leave"; playerId: string }
+  | { type: "start"; playerId: string; now: number }
+  | { type: "rematch"; playerId: string }
+  | OrderAction
+  | { type: "juryVote"; playerId: string; targetId: string }
+  | { type: "order"; playerId: string; order: OrderAction }
+  | { type: "cancelOrder"; playerId: string }
+  | { type: "tick"; now: number }
+  | { type: "resolveStep"; now: number };
+
+/** Actions a player can send. Ticks and resolution steps are only ever issued by the server. */
+export type PlayerAction = Exclude<Action, { type: "tick" } | { type: "resolveStep" }>;
 
 export type Result = { ok: true; state: GameState } | { ok: false; error: string };

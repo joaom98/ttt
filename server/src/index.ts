@@ -17,10 +17,11 @@ const dataDir = resolve(rootDir, process.env.DATA_DIR ?? "data");
 
 const store = new GameStore({ dataDir });
 const server = createApp(store, rootDir);
+// Fast enough for rounds mode's resolution steps (RESOLVE_STEP_MS) to keep a steady beat.
 const ticker = setInterval(() => {
   store.runDueTicks();
   store.runBots();
-}, 1000);
+}, 250);
 
 server.listen(port, host, () => {
   console.log(`Tank Turn Tactics running at http://localhost:${port}`);
