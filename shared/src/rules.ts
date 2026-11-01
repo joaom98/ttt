@@ -2,12 +2,12 @@
 // The server is the only one allowed to commit results; the client calls the same functions
 // to preview which actions are legal (highlighting cells, enabling buttons).
 
-import { autoBoardSide, makeConfig, MAX_NAME_LENGTH, MAX_PLAYERS, MIN_PLAYERS, RESOLVE_STEP_MS, TANK_COLORS } from "./config.ts";
+import { autoBoardSide, makeConfig, MAX_NAME_LENGTH, MAX_PLAYERS, MIN_PLAYERS, PARRY_COST, RESOLVE_STEP_MS, TANK_COLORS } from "./config.ts";
 import { Rng } from "./rng.ts";
 import type { Action, GameConfig, GameState, OrderAction, Position, Result, Tank } from "./types.ts";
 
 const MAX_LOG = 200;
-const ORDER_TYPES = new Set<string>(["move", "shoot", "giveAP", "giveHeart", "upgradeRange"]);
+const ORDER_TYPES = new Set<string>(["move", "shoot", "giveAP", "giveHeart", "upgradeRange", "parry"]);
 
 export interface CreateGameOptions {
   id: string;
@@ -120,7 +120,7 @@ export function applyAction(prev: GameState, action: Action): Result {
     const usedColors = new Set(Object.values(s.tanks).map((t) => t.color));
     const color = TANK_COLORS.find((c) => !usedColors.has(c)) ?? TANK_COLORS[s.order.length % TANK_COLORS.length]!;
     s.tanks[action.playerId] = {
-      id: action.playerId, name, color, x: -1, y: -1, hearts: 0, range: 0, ap: 0, alive: true,
+      id: action.playerId, name, color, x: -1, y: -1, hearts: 0, range: 0, ap: 0, alive: true, parrying: false,
     };
     s.order.push(action.playerId);
     log(`${name} joined.`);
@@ -157,6 +157,7 @@ export function applyAction(prev: GameState, action: Action): Result {
       t.range = s.config.startingRange;
       t.ap = s.config.startingAP;
       t.alive = true;
+      t.parrying = false;
     });
     s.phase = "playing";
     s.tick = 0;
@@ -185,7 +186,7 @@ export function applyAction(prev: GameState, action: Action): Result {
       s.config.width = 0;
       s.config.height = 0;
     }
-    for (const t of Object.values(s.tanks)) Object.assign(t, { x: -1, y: -1, hearts: 0, range: 0, ap: 0, alive: true });
+    for (const t of Object.values(s.tanks)) Object.assign(t, { x: -1, y: -1, hearts: 0, range: 0, ap: 0, alive: true, parrying: false });
     s.phase = "lobby";
     s.pickups = [];
     s.tick = 0;
@@ -310,6 +311,15 @@ function perform(s: GameState, action: OrderAction, log: Log): string | null {
     return null;
   }
 
+  if (action.type === "parry") {
+    if (me.parrying) return "You're already braced for a parry.";
+    if (me.ap < PARRY_COST) return `A parry costs ${PARRY_COST} AP.`;
+    me.ap -= PARRY_COST;
+    me.parrying = true; // until the next tick
+    log(`🛡️ ${me.name} braced for a parry.`);
+    return null;
+  }
+
   // Remaining actions all target another tank within range.
   const target = s.tanks[action.targetId];
   if (!target) return "No such tank.";
@@ -320,6 +330,14 @@ function perform(s: GameState, action: OrderAction, log: Log): string | null {
     if (!target.alive) return `${target.name} is already destroyed.`;
     if (me.ap < 1) return "Not enough AP.";
     me.ap -= 1;
+    if (target.parrying) {
+      // Predicted: no damage, and the shooter pays the defender on top of the wasted shot.
+      const stolen = Math.min(PARRY_COST, me.ap);
+      me.ap -= stolen;
+      target.ap += stolen;
+      log(`🛡️ ${target.name} parried ${me.name}'s shot${stolen ? ` and took ${stolen} AP` : ""}!`);
+      return null;
+    }
     target.hearts -= 1;
     if (target.hearts > 0) {
       log(`${me.name} shot ${target.name} (${target.hearts} ♥ left).`);
@@ -373,8 +391,17 @@ function perform(s: GameState, action: OrderAction, log: Log): string | null {
   return `Unknown action ${(unknown as { type: string }).type}`;
 }
 
-/** Rounds mode: lock in everyone's orders and shuffle who goes first. */
+/**
+ * Rounds mode: lock in everyone's orders and shuffle who goes first. Parries go up before anyone
+ * acts — a parry predicts this round's shots, so it must not depend on the turn order.
+ */
 function beginRound(s: GameState, rng: Rng, log: Log, now: number): void {
+  for (const [id, order] of Object.entries(s.orders)) {
+    if (order.type !== "parry") continue;
+    const error = perform(s, order, (text) => log(text, now));
+    if (error) log(`${s.tanks[id]?.name ?? "?"}'s parry was skipped: ${error}`, now);
+    delete s.orders[id];
+  }
   const turnOrder = rng.shuffle(livingTanks(s).map((t) => t.id)).filter((id) => s.orders[id]);
   const queue = turnOrder.map((id) => s.orders[id]!);
   s.orders = {};
@@ -391,6 +418,7 @@ function beginRound(s: GameState, rng: Rng, log: Log, now: number): void {
 /** AP income, the jury's bonus, heart spawns and the next tick's time. */
 function endTick(s: GameState, rng: Rng, log: Log, now: number): void {
   s.tick += 1;
+  for (const t of Object.values(s.tanks)) t.parrying = false; // parries last until the next tick
   for (const t of livingTanks(s)) t.ap += s.config.apPerTick;
 
   const tally = juryTally(s);

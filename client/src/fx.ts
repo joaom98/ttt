@@ -32,9 +32,16 @@ export function animateChange(prev: GameState | undefined, next: GameState, caus
     case "shoot": {
       const target = next.tanks[cause.targetId];
       const shooter = next.tanks[cause.playerId];
-      if (target && shooter) board.shot(shooter.id, target.id, shooter.color, !target.alive);
+      if (!target || !shooter) return;
+      if (prev.tanks[cause.targetId]?.parrying) {
+        const stolen = target.ap - (prev.tanks[cause.targetId]?.ap ?? target.ap);
+        return board.parried(shooter.id, target.id, shooter.color, stolen);
+      }
+      board.shot(shooter.id, target.id, shooter.color, !target.alive);
       return;
     }
+    case "parry":
+      return board.float(cause.playerId, "🛡️ Parry!", "ap");
     case "giveAP":
       return board.gift(cause.playerId, cause.targetId, "+1 AP", "ap");
     case "giveHeart":
@@ -127,8 +134,54 @@ class Board {
     );
   }
 
-  /** A tracer arrow from shooter to target, a shell along it, then the hit (or the explosion). */
+  /** A tracer arrow from shooter to target and a shell along it; the hit (or the explosion). */
   shot(fromId: string, toId: string, color: string, destroyed: boolean): void {
+    this.fire(fromId, toId, color, (b) => {
+      // The board may have been rebuilt meanwhile, so look the target up again.
+      this.tank(toId)?.animate(
+        [
+          { transform: "none", filter: "none" },
+          { transform: "translateX(-5px)", filter: "brightness(2) saturate(0.4)" },
+          { transform: "translateX(5px)" },
+          { transform: "translateX(-3px)" },
+          { transform: "none", filter: "none" },
+        ],
+        { duration: 380 },
+      );
+      if (destroyed) {
+        const boom = spawn("fx-boom", b, 900);
+        boom.textContent = "💥";
+        boom.style.fontSize = `${this.pitch() * 1.4}px`;
+        boom.animate(
+          [{ transform: "translate(-50%, -50%) scale(0.2)", opacity: 1 }, { transform: "translate(-50%, -50%) scale(1.3)", opacity: 1, offset: 0.35 }, { transform: "translate(-50%, -50%) scale(1.6)", opacity: 0 }],
+          { duration: 850, easing: "ease-out" },
+        );
+      }
+      this.float(toId, destroyed ? "Destroyed!" : "−1 ♥", "damage");
+    });
+  }
+
+  /** The same shot, turned away: a shield flash, "Parried!", and the stolen AP flying to the defender. */
+  parried(fromId: string, toId: string, color: string, stolen: number): void {
+    this.fire(fromId, toId, color, (b) => {
+      const shield = spawn("fx-boom", b, 700);
+      shield.textContent = "🛡️";
+      shield.style.fontSize = `${this.pitch() * 1.1}px`;
+      shield.animate(
+        [{ transform: "translate(-50%, -50%) scale(0.6)", opacity: 1 }, { transform: "translate(-50%, -50%) scale(1.25)", opacity: 1, offset: 0.4 }, { transform: "translate(-50%, -50%) scale(1.4)", opacity: 0 }],
+        { duration: 650, easing: "ease-out" },
+      );
+      this.tank(toId)?.animate(
+        [{ transform: "scale(1)" }, { transform: "scale(1.15)", filter: "brightness(1.4)" }, { transform: "scale(1)" }],
+        { duration: 350, easing: "ease-out" },
+      );
+      this.float(toId, "Parried!", "ap");
+      if (stolen > 0) setTimeout(() => this.gift(fromId, toId, `+${stolen} AP`, "ap"), 350);
+    });
+  }
+
+  /** Tracer and shell from one tank to another; calls `impact` with the target's centre when it lands. */
+  fire(fromId: string, toId: string, color: string, impact: (at: Point) => void): void {
     const a = this.centerOf(fromId);
     const b = this.centerOf(toId);
     if (!a || !b) return;
@@ -154,29 +207,7 @@ class Board {
       duration: travel, easing: "ease-in",
     });
 
-    setTimeout(() => {
-      // The board may have been rebuilt meanwhile, so look the target up again.
-      this.tank(toId)?.animate(
-        [
-          { transform: "none", filter: "none" },
-          { transform: "translateX(-5px)", filter: "brightness(2) saturate(0.4)" },
-          { transform: "translateX(5px)" },
-          { transform: "translateX(-3px)" },
-          { transform: "none", filter: "none" },
-        ],
-        { duration: 380 },
-      );
-      if (destroyed) {
-        const boom = spawn("fx-boom", b, 900);
-        boom.textContent = "💥";
-        boom.style.fontSize = `${this.pitch() * 1.4}px`;
-        boom.animate(
-          [{ transform: "translate(-50%, -50%) scale(0.2)", opacity: 1 }, { transform: "translate(-50%, -50%) scale(1.3)", opacity: 1, offset: 0.35 }, { transform: "translate(-50%, -50%) scale(1.6)", opacity: 0 }],
-          { duration: 850, easing: "ease-out" },
-        );
-      }
-      this.float(toId, destroyed ? "Destroyed!" : "−1 ♥", "damage");
-    }, travel);
+    setTimeout(() => impact(b), travel);
   }
 
   /** A token flies from giver to receiver. */

@@ -3,7 +3,7 @@
 // The shared rules (canApply, distance…) decide what's highlighted and which buttons are enabled,
 // so the UI can never disagree with the server about what's legal.
 
-import { DEFAULT_PRESET, makeConfig, PRESETS } from "../../shared/src/config.ts";
+import { DEFAULT_PRESET, makeConfig, PARRY_COST, PRESETS } from "../../shared/src/config.ts";
 import { canApply, distance, juryTally, livingTanks, tankAt } from "../../shared/src/rules.ts";
 import type { GameConfig, GameState, OrderAction, PlayerAction, Tank } from "../../shared/src/types.ts";
 import { BOT_PERSONALITIES, type BotPersonality, type ChatMessage, type StateMessage } from "../../shared/src/view.ts";
@@ -12,7 +12,7 @@ import { animateChange } from "./fx.ts";
 
 const BOT_LABELS: Record<BotPersonality, string> = {
   hunter: "Hunter — chases and shoots the weakest tank",
-  turtle: "Turtle — saves up, upgrades range, picks off easy kills",
+  turtle: "Turtle — saves up, parries, upgrades range, picks off easy kills",
   wildcard: "Wildcard — random moves, shots and gifts",
 };
 
@@ -406,7 +406,7 @@ interface Plan {
   marks: Map<string, string>;
 }
 
-const ORDER_ICONS = { move: "➜", shoot: "💥", giveAP: "⚡", giveHeart: "♥", upgradeRange: "⬆" } as const;
+const ORDER_ICONS = { move: "➜", shoot: "💥", giveAP: "⚡", giveHeart: "♥", upgradeRange: "⬆", parry: "🛡️" } as const;
 
 function planFor(s: GameState, mine: Tank | undefined): Plan {
   const planning = s.config.mode === "rounds" && s.phase === "playing" && !s.resolving && !!mine?.alive;
@@ -414,7 +414,7 @@ function planFor(s: GameState, mine: Tank | undefined): Plan {
   const plan: Plan = { planning, order, moveTo: null, marks: new Map() };
   if (!order || !mine) return plan;
   if (order.type === "move") plan.moveTo = `${mine.x + order.dx},${mine.y + order.dy}`;
-  else plan.marks.set(order.type === "upgradeRange" ? mine.id : order.targetId, ORDER_ICONS[order.type]);
+  else plan.marks.set(order.type === "upgradeRange" || order.type === "parry" ? mine.id : order.targetId, ORDER_ICONS[order.type]);
   return plan;
 }
 
@@ -426,6 +426,7 @@ function describeOrder(s: GameState, o: OrderAction): string {
     case "giveAP": return `${ORDER_ICONS.giveAP} Give 1 AP to ${name(o.targetId)}`;
     case "giveHeart": return `${ORDER_ICONS.giveHeart} Give a heart to ${name(o.targetId)}`;
     case "upgradeRange": return `${ORDER_ICONS.upgradeRange} Upgrade range`;
+    case "parry": return `${ORDER_ICONS.parry} Parry`;
   }
 }
 
@@ -500,7 +501,13 @@ function popover(s: GameState, mine: Tank | undefined, plan: Plan, t: Tank): str
       actions = `<p class="muted small">This round is playing out — you can plan again in a moment.</p>`;
     } else if (isMe && mine.alive) {
       const upgrade = intent(s, { type: "upgradeRange", playerId: mine.id });
-      actions = `<div class="actions"><button class="primary" data-act="upgrade" ${canApply(s, upgrade) ? "" : "disabled"}>⬆ ${rounds ? "Plan: upgrade" : "Upgrade"} range (${s.config.upgradeRangeCost} AP)</button></div>`;
+      const parry = intent(s, { type: "parry", playerId: mine.id });
+      actions = `
+        <div class="actions">
+          <button class="primary" data-act="upgrade" ${canApply(s, upgrade) ? "" : "disabled"}>⬆ ${rounds ? "Plan: upgrade" : "Upgrade"} range (${s.config.upgradeRangeCost} AP)</button>
+          <button data-act="parry" ${canApply(s, parry) ? "" : "disabled"}>🛡️ ${mine.parrying ? "Parrying" : rounds ? "Plan a parry" : "Parry"} (${PARRY_COST} AP)</button>
+        </div>
+        <p class="muted small">Parry: shots at you ${rounds ? "this round" : "until the next tick"} do no damage, and each shooter loses ${PARRY_COST} AP to you${rounds ? " — if you guessed right" : ""}.</p>`;
     } else if (isMe && s.juryVotes[mine.id]) {
       actions = `<p class="small">Your jury vote: <b>${esc(s.tanks[s.juryVotes[mine.id]!]?.name ?? "?")}</b></p>`;
     } else if (!isMe && mine.alive) {
@@ -564,7 +571,7 @@ function cellHtml(s: GameState, mine: Tank | undefined, plan: Plan, x: number, y
     data += ` data-tank="${t.id}"`;
   }
   let inner = t
-    ? `<div class="tank ${t.alive ? "" : "wreck"} ${t.id === mine?.id ? "mine" : ""}" style="--c:${t.color}" title="${esc(tankTitle(t))}">
+    ? `<div class="tank ${t.alive ? "" : "wreck"} ${t.id === mine?.id ? "mine" : ""} ${t.parrying ? "parrying" : ""}" style="--c:${t.color}" title="${esc(tankTitle(t))}">
         <span class="initials">${esc(initials(t.name))}</span>
         <span class="hp">${t.alive ? "♥".repeat(Math.min(t.hearts, 5)) + (t.hearts > 5 ? "+" : "") : "✖"}</span>
       </div>`
@@ -770,6 +777,7 @@ async function onButton(act: string, button: HTMLButtonElement): Promise<void> {
     start: { type: "start", playerId: id, now: 0 },
     leave: { type: "leave", playerId: id },
     upgrade: intent(s, { type: "upgradeRange", playerId: id }),
+    parry: intent(s, { type: "parry", playerId: id }),
     shoot: intent(s, { type: "shoot", playerId: id, targetId: target }),
     giveAP: intent(s, { type: "giveAP", playerId: id, targetId: target }),
     giveHeart: intent(s, { type: "giveHeart", playerId: id, targetId: target }),
@@ -868,7 +876,7 @@ function initials(name: string): string {
 }
 
 function tankTitle(t: Tank): string {
-  return `${t.name}${t.alive ? "" : " (destroyed)"} — ${t.hearts} hearts, ${t.ap} AP, range ${t.range}`;
+  return `${t.name}${t.alive ? "" : " (destroyed)"} — ${t.hearts} hearts, ${t.ap} AP, range ${t.range}${t.parrying ? ", parrying" : ""}`;
 }
 
 function esc(s: string): string {

@@ -14,7 +14,7 @@ export const BOT_NAMES: Record<BotPersonality, string[]> = {
 
 export const BOT_DESCRIPTIONS: Record<BotPersonality, string> = {
   hunter: "Hunter: closes in and shoots the weakest tank it can reach",
-  turtle: "Turtle: saves AP, upgrades range, backs off, and only goes for easy kills",
+  turtle: "Turtle: saves AP, upgrades range, parries or backs off, and only goes for easy kills",
   wildcard: "Wildcard: does something random — including gifts",
 };
 
@@ -52,7 +52,10 @@ export function chooseBotAction(
   const pickup = stepOntoPickup(s, me);
 
   if (personality === "hunter") {
-    if (inReach.length) return legal(shoot(weakest(inReach)));
+    // A tank that is visibly parrying would just eat the shot (and an AP), so pick someone else.
+    const open = inReach.filter((t) => !t.parrying);
+    if (open.length) return legal(shoot(weakest(open)));
+    if (inReach.length) return null; // only parrying tanks in reach: wait it out
     if (pickup) return pickup;
     // Close in, but keep 1 AP for the shot once we get there.
     if (me.ap >= 2) return stepToward(s, me, nearest(me, enemies));
@@ -60,11 +63,15 @@ export function chooseBotAction(
   }
 
   if (personality === "turtle") {
-    const killable = inReach.filter((t) => t.hearts === 1);
+    const open = inReach.filter((t) => !t.parrying);
+    const killable = open.filter((t) => t.hearts === 1);
     if (killable.length) return legal(shoot(weakest(killable)));
     const threats = enemies.filter((t) => distance(t, me) <= t.range);
-    if (threats.length && inReach.length && me.ap >= 2) return legal(shoot(weakest(inReach)));
+    if (threats.length && open.length && me.ap >= 2) return legal(shoot(weakest(open)));
     if (threats.length) {
+      // Under fire: usually brace for it, otherwise back off.
+      const parry = me.parrying || random() < 0.4 ? null : legal({ type: "parry", playerId: me.id });
+      if (parry) return parry;
       const away = stepAway(s, me, threats);
       if (away) return away;
     }
@@ -130,7 +137,7 @@ function stepAway(s: GameState, me: Tank, threats: Tank[]): PlayerAction | null 
 }
 
 function allActions(s: GameState, me: Tank): PlayerAction[] {
-  const actions: PlayerAction[] = [...moves(s, me), { type: "upgradeRange", playerId: me.id }];
+  const actions: PlayerAction[] = [...moves(s, me), { type: "upgradeRange", playerId: me.id }, { type: "parry", playerId: me.id }];
   for (const t of Object.values(s.tanks)) {
     if (t.id === me.id) continue;
     actions.push(

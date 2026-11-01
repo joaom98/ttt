@@ -44,6 +44,8 @@ export const TANK_COLORS = [
 
 /** The preset picked by default and used for practice games. */
 export const DEFAULT_PRESET = "rounds";
+/** AP a parry costs; a parried shooter also loses this much AP to the defender. */
+export const PARRY_COST = 1;
 /** Rounds mode: pause between resolution steps, so everyone can follow (and animate) each order. */
 export const RESOLVE_STEP_MS = 700;
 

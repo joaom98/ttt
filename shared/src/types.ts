@@ -46,6 +46,8 @@ export interface Tank {
   range: number;
   ap: number;
   alive: boolean;
+  /** Braced for a hit until the next tick: shots do no damage and the shooter loses 1 AP to us. */
+  parrying: boolean;
 }
 
 export interface Position {
@@ -97,7 +99,8 @@ export type OrderAction =
   | { type: "shoot"; playerId: string; targetId: string }
   | { type: "giveAP"; playerId: string; targetId: string }
   | { type: "giveHeart"; playerId: string; targetId: string }
-  | { type: "upgradeRange"; playerId: string };
+  | { type: "upgradeRange"; playerId: string }
+  | { type: "parry"; playerId: string };
 
 export interface Resolution {
   /** The shuffled order players act in this round (only players who planned something). */
