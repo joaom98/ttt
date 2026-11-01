@@ -103,6 +103,8 @@ nav.top { display: flex; justify-content: space-between; margin-bottom: 12px; }
 .banner.dead { border-color: var(--danger); }
 .lobby { max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
 .add-bot { margin-bottom: 12px; }
+.rules-form { border-top: 1px solid var(--line); padding-top: 12px; margin-bottom: 12px; }
+.rules-form select { width: 100%; }
 .add-bot select { flex: 1; min-width: 0; }
 .players { list-style: none; padding: 0; }
 .players li { padding: 6px 0; display: flex; align-items: center; gap: 8px; }
@@ -208,6 +210,13 @@ nav.top { display: flex; justify-content: space-between; margin-bottom: 12px; }
 }
 .tank.mine { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text); }
 .tank.wreck { filter: grayscale(1) brightness(0.55); }
+/* Braced for a hit: a shield badge and a pale glow. */
+.tank { position: relative; }
+.tank.parrying { box-shadow: 0 0 0 3px #3b9cff, 0 0 14px 4px rgba(59, 156, 255, 0.7); }
+.tank.parrying::after {
+  content: "🛡️"; position: absolute; left: -6px; bottom: -6px;
+  font-size: max(10px, calc(var(--cell) * 0.28)); line-height: 1;
+}
 .tank .initials { font-weight: 800; font-size: calc(var(--cell) * 0.3); }
 .tank .hp { font-size: calc(var(--cell) * 0.18); margin-top: 2px; color: #7a0010; letter-spacing: -1px; }
 .hint { margin-top: 8px; }

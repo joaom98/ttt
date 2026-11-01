@@ -24,6 +24,7 @@ These are the rules the code implements today, based on the original Halfbrick p
 | Upgrade range | *3 AP* | Your range increases by 1. |
 | Give AP | 1 AP | Transfer 1 AP to a living tank within range. |
 | Give a heart | 1 heart | Give one of your hearts to a tank within range. You must keep at least one. |
+| Parry | 1 AP | Brace for a hit until the next tick. Every shot at you does no damage, and each shooter loses 1 more AP to you (if they have any). Can't be stacked. |
 
 **Range** is measured in squares including diagonals: range 2 covers the 5×5 area around you.
 
@@ -41,14 +42,16 @@ Each game uses one of two timing modes (*real time* by default; the **Rounds** p
 
 - **Real time:** spend AP whenever you like; actions happen the moment you click.
 - **Rounds:** every tick (*10 seconds* in the Rounds pace) is a round. During it you plan **one order** —
-  a move, a shot, a gift or an upgrade — checked against the board as it is. Picking another order replaces
+  a move, a shot, a gift, an upgrade or a parry — checked against the board as it is. Picking another order replaces
   it, and you can cancel it. Orders are **secret** until they play out. When the timer runs out:
-  1. The tanks that planned something are put in a **random order**, announced in the event log. Tanks
-     that planned nothing simply sit the round out.
-  2. One tank at a time, in that order, carries out its order.
-  3. An order that no longer works when its turn comes (the target moved out of range or was destroyed,
+  1. **Parries go up first**, before anyone acts, so a parry protects you whatever the turn order. (In
+     real time a parry is visible to everyone; in rounds it's a secret guess.)
+  2. The other tanks that planned something are put in a **random order**, announced in the event log.
+     Tanks that planned nothing simply sit the round out.
+  3. One tank at a time, in that order, carries out its order.
+  4. An order that no longer works when its turn comes (the target moved out of range or was destroyed,
      the square was taken…) is **skipped and costs nothing**.
-  4. Then the tick happens: AP income, the jury's bonus and heart spawns, and the next round starts.
+  5. Then the tick happens: parries wear off, AP income, the jury's bonus and heart spawns, and the next round starts.
 
   A tank destroyed earlier in the round doesn't get to act, so going first can decide a duel. Chat stays
   live the whole time.

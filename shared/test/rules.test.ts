@@ -353,6 +353,81 @@ describe("rounds mode", () => {
   });
 });
 
+describe("parry", () => {
+  const shoot = (s: GameState, from = "p0", to = "p1") => ok(s, { type: "shoot", playerId: from, targetId: to });
+
+  it("costs 1 AP; a shot at a parrying tank does no damage and the shooter loses 1 AP to it", () => {
+    let s = board([{ x: 0, y: 0, ap: 3 }, { x: 1, y: 1, ap: 1 }]);
+    s = ok(s, { type: "parry", playerId: "p1" });
+    assert.equal(s.tanks.p1!.ap, 0);
+    assert.equal(s.tanks.p1!.parrying, true);
+    s = shoot(s);
+    assert.equal(s.tanks.p1!.hearts, 3, "no damage");
+    assert.equal(s.tanks.p0!.ap, 3 - 1 - 1, "the shot plus the stolen AP");
+    assert.equal(s.tanks.p1!.ap, 1);
+    assert.match(s.log.at(-1)!.text, /parried/);
+    s = shoot(s);
+    assert.equal(s.tanks.p1!.hearts, 3, "it holds for every shot until the tick");
+    assert.equal(s.tanks.p0!.ap, 0, "nothing left to steal");
+  });
+
+  it("can't be stacked or bought without AP, and wears off at the tick", () => {
+    let s = board([{ x: 0, y: 0, ap: 2 }, { x: 1, y: 1, ap: 0 }]);
+    assert.match(err(s, { type: "parry", playerId: "p1" }), /1 AP/);
+    s = ok(s, { type: "parry", playerId: "p0" });
+    assert.match(err(s, { type: "parry", playerId: "p0" }), /already/);
+    s = tick(s);
+    assert.equal(s.tanks.p0!.parrying, false);
+    assert.equal(shoot(s, "p1", "p0").tanks.p0!.hearts, 2, "a hit lands again after the tick");
+  });
+
+  it("in rounds mode goes up before anyone acts, whatever the turn order", () => {
+    for (let seed = 0; seed < 10; seed++) {
+      let s = board([{ x: 0, y: 0, ap: 2 }, { x: 1, y: 1, ap: 1 }], { mode: "rounds", tickIntervalMs: 10_000 });
+      s.rng = seed;
+      s = ok(s, { type: "order", playerId: "p0", order: { type: "shoot", playerId: "p0", targetId: "p1" } });
+      s = ok(s, { type: "order", playerId: "p1", order: { type: "parry", playerId: "p1" } });
+      s = tick(s);
+      assert.equal(s.tanks.p1!.parrying, true, "raised as the round begins");
+      assert.deepEqual(s.resolving!.turnOrder, ["p0"], "a parry isn't a turn of its own");
+      for (let i = 0; s.resolving && i < 10; i++) s = ok(s, { type: "resolveStep", now: 3000 + i * 1000 });
+      assert.equal(s.tanks.p1!.hearts, 3);
+      assert.equal(s.tanks.p0!.ap, 0 + 1, "lost the shot and the parry's AP, then got income");
+      assert.equal(s.tanks.p1!.parrying, false, "gone for the next round");
+    }
+  });
+});
+
+describe("changing the rules in the lobby", () => {
+  it("lets the host change some rules and keeps the rest", () => {
+    const s = ok(lobby(["Ana", "Bia"]), { type: "configure", playerId: "p0", config: { mode: "rounds", startingHearts: 5 } });
+    assert.equal(s.config.mode, "rounds");
+    assert.equal(s.config.startingHearts, 5);
+    assert.equal(s.config.startingRange, 2, "untouched rules stay");
+    const started = ok(s, { type: "start", playerId: "p0", now: 0 });
+    assert.ok(Object.values(started.tanks).every((t) => t.hearts === 5));
+  });
+
+  it("clamps silly values and ignores unknown or mistyped ones", () => {
+    const s = ok(lobby(["Ana", "Bia"]), {
+      type: "configure", playerId: "p0",
+      config: { startingHearts: 999, width: 2, debug: "yes" as unknown as boolean, mode: "chaos" as "rounds", nonsense: 1 } as Partial<GameConfig>,
+    });
+    assert.equal(s.config.startingHearts, 20);
+    assert.equal(s.config.width, 5);
+    assert.equal(s.config.debug, false);
+    assert.equal(s.config.mode, "realtime");
+    assert.equal("nonsense" in s.config, false);
+  });
+
+  it("is only for the host, and only before the game starts", () => {
+    const s = lobby(["Ana", "Bia"]);
+    assert.match(err(s, { type: "configure", playerId: "p1", config: { startingHearts: 1 } }), /host/);
+    const started = ok(s, { type: "start", playerId: "p0", now: 0 });
+    assert.match(err(started, { type: "configure", playerId: "p0", config: { startingHearts: 1 } }), /lobby/);
+  });
+});
+
 describe("rematch", () => {
   const finished = () => ok(board([{ x: 0, y: 0, ap: 3 }, { x: 1, y: 1, hearts: 1 }]), { type: "shoot", playerId: "p0", targetId: "p1" });
 

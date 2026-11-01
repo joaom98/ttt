@@ -33,9 +33,24 @@ describe("bots", () => {
     assert.deepEqual(chooseBotAction(s, "bot", "hunter"), { type: "move", playerId: "bot", dx: 1, dy: 1 });
   });
 
+  it("turtles under fire usually parry", () => {
+    const s = game({ bot: { x: 5, y: 5, ap: 1, range: 1 }, threat: { x: 7, y: 5, range: 2 } });
+    assert.deepEqual(chooseBotAction(s, "bot", "turtle", () => 0.9), { type: "parry", playerId: "bot" });
+    s.tanks.bot!.parrying = true;
+    assert.equal(chooseBotAction(s, "bot", "turtle", () => 0.9)?.type, "move", "already braced: back off instead");
+  });
+
+  it("hunters don't shoot into a visible parry", () => {
+    const s = game({ bot: { x: 5, y: 5, ap: 2 }, guarded: { x: 6, y: 5, hearts: 1, parrying: true }, open: { x: 4, y: 4 } });
+    assert.deepEqual(chooseBotAction(s, "bot", "hunter"), { type: "shoot", playerId: "bot", targetId: "open" });
+    s.tanks.open!.x = 9;
+    s.tanks.open!.y = 0;
+    assert.equal(chooseBotAction(s, "bot", "hunter"), null, "waits rather than wasting AP");
+  });
+
   it("turtles back away from threats they can't hit and upgrade when safe", () => {
     const s = game({ bot: { x: 5, y: 5, ap: 1, range: 1 }, threat: { x: 7, y: 5, range: 2 } });
-    const away = chooseBotAction(s, "bot", "turtle");
+    const away = chooseBotAction(s, "bot", "turtle", () => 0); // the "back off" branch
     assert.equal(away?.type, "move");
     assert.equal((away as { dx: number }).dx, -1);
     s.tanks.threat!.x = 9;
