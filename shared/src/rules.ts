@@ -2,12 +2,13 @@
 // The server is the only one allowed to commit results; the client calls the same functions
 // to preview which actions are legal (highlighting cells, enabling buttons).
 
-import { autoBoardSide, makeConfig, MAX_NAME_LENGTH, MAX_PLAYERS, MIN_PLAYERS, PARRY_COST, RESOLVE_STEP_MS, TANK_COLORS } from "./config.ts";
+import { autoBoardSide, DEFENSE_COST, makeConfig, MAX_NAME_LENGTH, MAX_PLAYERS, MIN_PLAYERS, PARRY_COST, RESOLVE_STEP_MS, TANK_COLORS } from "./config.ts";
 import { Rng } from "./rng.ts";
 import type { Action, GameConfig, GameState, OrderAction, Position, Result, Tank } from "./types.ts";
 
 const MAX_LOG = 200;
-const ORDER_TYPES = new Set<string>(["move", "shoot", "giveAP", "giveHeart", "upgradeRange", "parry"]);
+const ORDER_TYPES = new Set<string>(["move", "shoot", "giveAP", "giveHeart", "upgradeRange", "defend", "parry", "heal"]);
+const GUARD_ORDERS = new Set<string>(["defend", "parry"]);
 
 export interface CreateGameOptions {
   id: string;
@@ -29,6 +30,8 @@ export function createGame(opts: CreateGameOptions): Result {
     pickups: [],
     tick: 0,
     nextTickAt: null,
+    round: 0,
+    nextRoundAt: null,
     juryVotes: {},
     orders: {},
     resolving: null,
@@ -120,7 +123,7 @@ export function applyAction(prev: GameState, action: Action): Result {
     const usedColors = new Set(Object.values(s.tanks).map((t) => t.color));
     const color = TANK_COLORS.find((c) => !usedColors.has(c)) ?? TANK_COLORS[s.order.length % TANK_COLORS.length]!;
     s.tanks[action.playerId] = {
-      id: action.playerId, name, color, x: -1, y: -1, hearts: 0, range: 0, ap: 0, alive: true, parrying: false,
+      id: action.playerId, name, color, x: -1, y: -1, hearts: 0, range: 0, ap: 0, alive: true, guard: null, stunned: false,
     };
     s.order.push(action.playerId);
     log(`${name} joined.`);
@@ -135,6 +138,18 @@ export function applyAction(prev: GameState, action: Action): Result {
     s.order = s.order.filter((id) => id !== action.playerId);
     if (s.hostId === action.playerId && s.order[0]) s.hostId = s.order[0];
     log(`${tank.name} left.`);
+    return ok();
+  }
+
+  if (action.type === "kick") {
+    if (s.phase !== "lobby") return fail("Players can only be removed in the lobby.");
+    if (action.playerId !== s.hostId) return fail("Only the host can remove players.");
+    if (action.targetId === s.hostId) return fail("You can't remove yourself — leave instead.");
+    const tank = s.tanks[action.targetId];
+    if (!tank) return fail("That player isn't in this game.");
+    delete s.tanks[tank.id];
+    s.order = s.order.filter((id) => id !== tank.id);
+    log(`${tank.name} was removed by the host.`);
     return ok();
   }
 
@@ -157,11 +172,14 @@ export function applyAction(prev: GameState, action: Action): Result {
       t.range = s.config.startingRange;
       t.ap = s.config.startingAP;
       t.alive = true;
-      t.parrying = false;
+      t.guard = null;
+      t.stunned = false;
     });
     s.phase = "playing";
     s.tick = 0;
     s.nextTickAt = action.now + s.config.tickIntervalMs;
+    s.round = 0;
+    s.nextRoundAt = s.config.mode === "rounds" ? action.now + s.config.roundIntervalMs : null;
     s.orders = {};
     s.resolving = null;
     s.rng = rng.seed;
@@ -186,11 +204,13 @@ export function applyAction(prev: GameState, action: Action): Result {
       s.config.width = 0;
       s.config.height = 0;
     }
-    for (const t of Object.values(s.tanks)) Object.assign(t, { x: -1, y: -1, hearts: 0, range: 0, ap: 0, alive: true, parrying: false });
+    for (const t of Object.values(s.tanks)) Object.assign(t, { x: -1, y: -1, hearts: 0, range: 0, ap: 0, alive: true, guard: null, stunned: false });
     s.phase = "lobby";
     s.pickups = [];
     s.tick = 0;
     s.nextTickAt = null;
+    s.round = 0;
+    s.nextRoundAt = null;
     s.juryVotes = {};
     s.orders = {};
     s.resolving = null;
@@ -199,15 +219,19 @@ export function applyAction(prev: GameState, action: Action): Result {
     return ok();
   }
 
-  // --- Server clock --------------------------------------------------------------------------
+  // --- Server clocks -------------------------------------------------------------------------
+  // Two independent clocks: AP ticks (both modes) and, in rounds mode, the end of each round.
   if (action.type === "tick") {
     if (s.phase !== "playing") return fail("The game is not running.");
-    if (s.config.mode === "rounds") {
-      if (s.resolving) return fail("The round is already resolving.");
-      beginRound(s, rng, log, action.now);
-    } else {
-      endTick(s, rng, log, action.now);
-    }
+    endTick(s, rng, log, action.now);
+    s.rng = rng.seed;
+    return ok();
+  }
+
+  if (action.type === "endRound") {
+    if (s.phase !== "playing" || s.config.mode !== "rounds") return fail("No round is running.");
+    if (s.resolving) return fail("The round is already playing out.");
+    beginRound(s, rng, log, action.now);
     s.rng = rng.seed;
     return ok();
   }
@@ -221,8 +245,7 @@ export function applyAction(prev: GameState, action: Action): Result {
     while (r.queue[0] && !s.tanks[r.queue[0].playerId]?.alive) r.queue.shift();
     const step = r.queue.shift();
     if (!step) {
-      s.resolving = null;
-      endTick(s, rng, log, action.now);
+      finishRound(s, r.sittingOut, action.now);
     } else {
       const actor = s.tanks[step.playerId]!;
       const error = perform(s, step, (text) => log(text, action.now));
@@ -254,6 +277,7 @@ export function applyAction(prev: GameState, action: Action): Result {
   if (action.type === "order" || action.type === "cancelOrder") {
     if (s.config.mode !== "rounds") return fail("This game is played in real time — just act.");
     if (s.resolving) return fail("Wait for this round to finish playing out.");
+    if (me.stunned) return fail("You're stunned and sit the next round out.");
     if (action.type === "cancelOrder") {
       if (!s.orders[me.id]) return fail("You have no order to cancel.");
       delete s.orders[me.id];
@@ -269,6 +293,7 @@ export function applyAction(prev: GameState, action: Action): Result {
   }
 
   if (s.config.mode === "rounds") return fail("Plan your orders — they play out when the round ends.");
+  if (me.stunned) return fail("You're stunned until the next tick.");
   const error = perform(s, action, log);
   return error ? fail(error) : ok();
 }
@@ -311,54 +336,67 @@ function perform(s: GameState, action: OrderAction, log: Log): string | null {
     return null;
   }
 
-  if (action.type === "parry") {
-    if (me.parrying) return "You're already braced for a parry.";
-    if (me.ap < PARRY_COST) return `A parry costs ${PARRY_COST} AP.`;
-    me.ap -= PARRY_COST;
-    me.parrying = true; // until the next tick
-    log(`🛡️ ${me.name} braced for a parry.`);
+  if (action.type === "heal") {
+    if (!s.config.allowHeal) return "Healing is disabled in this game.";
+    if (me.hearts >= s.config.startingHearts) return `You can only heal up to ${s.config.startingHearts} ♥.`;
+    if (me.ap < s.config.healCost) return `Healing costs ${s.config.healCost} AP.`;
+    me.ap -= s.config.healCost;
+    me.hearts += 1;
+    log(`➕ ${me.name} repaired a heart (${me.hearts} ♥).`);
     return null;
   }
 
-  // Remaining actions all target another tank within range.
+  if (action.type === "defend" || action.type === "parry") {
+    // Lasts for this round (rounds mode) or until the next tick (real time).
+    const parry = action.type === "parry";
+    if (me.guard) return `You're already braced (${me.guard}).`;
+    const cost = parry ? PARRY_COST : DEFENSE_COST;
+    if (me.ap < cost) return `${parry ? "A parry" : "Defense"} costs ${cost} AP.`;
+    me.ap -= cost;
+    me.guard = parry ? "parry" : "defense";
+    log(parry ? `⚔️ ${me.name} readied a parry.` : `🛡️ ${me.name} raised their defense.`);
+    return null;
+  }
+
+  if (action.type === "shoot") {
+    // Aimed at a square: whoever is there when it fires gets hit — or nobody, and it misses.
+    const at = { x: action.x, y: action.y };
+    if (!Number.isInteger(at.x) || !Number.isInteger(at.y)) return "Pick a square to shoot.";
+    if (at.x < 0 || at.y < 0 || at.x >= s.config.width || at.y >= s.config.height) return "That's off the board.";
+    if (at.x === me.x && at.y === me.y) return "You can't shoot your own square.";
+    if (!inRange(me, at)) return `${coord(at)} is out of range.`;
+    if (me.ap < 1) return "Not enough AP.";
+    me.ap -= 1;
+    const target = tankAt(s, at);
+    if (!target?.alive) {
+      log(`${me.name}'s shot at ${coord(at)} ${target ? `hit ${target.name}'s wreck` : "missed"}.`);
+      return null;
+    }
+    if (target.guard === "defense") {
+      log(`🛡️ ${target.name}'s defense blocked ${me.name}'s shot.`);
+      return null;
+    }
+    if (target.guard === "parry") {
+      // Predicted: no damage, and depending on the rules the shooter pays AP, is stunned and/or
+      // takes a counter-hit (which can destroy it — the defender then counts as the killer).
+      const stolen = Math.min(s.config.parrySteal, me.ap);
+      me.ap -= stolen;
+      target.ap += stolen;
+      if (s.config.parryStuns) me.stunned = true;
+      const extras = [stolen ? `took ${stolen} AP` : "", s.config.parryStuns ? `stunned ${me.name}` : ""].filter(Boolean);
+      log(`⚔️ ${target.name} parried ${me.name}'s shot${extras.length ? ` and ${extras.join(" and ")}` : ""}!`);
+      if (s.config.parryDamage > 0) damage(s, target, me, s.config.parryDamage, "hit back at", log);
+      return null;
+    }
+    damage(s, me, target, 1, "shot", log);
+    return null;
+  }
+
+  // Gifts target another tank within range.
   const target = s.tanks[action.targetId];
   if (!target) return "No such tank.";
   if (target.id === me.id) return "You can't target yourself.";
   if (!inRange(me, target)) return `${target.name} is out of range.`;
-
-  if (action.type === "shoot") {
-    if (!target.alive) return `${target.name} is already destroyed.`;
-    if (me.ap < 1) return "Not enough AP.";
-    me.ap -= 1;
-    if (target.parrying) {
-      // Predicted: no damage, and the shooter pays the defender on top of the wasted shot.
-      const stolen = Math.min(PARRY_COST, me.ap);
-      me.ap -= stolen;
-      target.ap += stolen;
-      log(`🛡️ ${target.name} parried ${me.name}'s shot${stolen ? ` and took ${stolen} AP` : ""}!`);
-      return null;
-    }
-    target.hearts -= 1;
-    if (target.hearts > 0) {
-      log(`${me.name} shot ${target.name} (${target.hearts} ♥ left).`);
-    } else {
-      target.alive = false;
-      target.hearts = 0;
-      let loot = "";
-      if (s.config.killerTakesAP && target.ap > 0) {
-        loot = ` and took their ${target.ap} AP`;
-        me.ap += target.ap;
-        target.ap = 0;
-      }
-      // Votes for a dead tank no longer count.
-      for (const [voter, votedFor] of Object.entries(s.juryVotes)) {
-        if (votedFor === target.id) delete s.juryVotes[voter];
-      }
-      log(`💥 ${me.name} destroyed ${target.name}${loot}!`);
-      checkForWinner(s, log);
-    }
-    return null;
-  }
 
   if (action.type === "giveAP") {
     if (!target.alive) return `${target.name} is destroyed — AP would be wasted.`;
@@ -391,34 +429,75 @@ function perform(s: GameState, action: OrderAction, log: Log): string | null {
   return `Unknown action ${(unknown as { type: string }).type}`;
 }
 
+/** Take hearts from `victim`; at 0 it's destroyed, with `attacker` as the killer. */
+function damage(s: GameState, attacker: Tank, victim: Tank, amount: number, verb: string, log: Log): void {
+  victim.hearts -= amount;
+  if (victim.hearts > 0) {
+    log(`${attacker.name} ${verb} ${victim.name} (${victim.hearts} ♥ left).`);
+    return;
+  }
+  victim.alive = false;
+  victim.hearts = 0;
+  victim.guard = null;
+  let loot = "";
+  if (s.config.killerTakesAP && victim.ap > 0) {
+    loot = ` and took their ${victim.ap} AP`;
+    attacker.ap += victim.ap;
+    victim.ap = 0;
+  }
+  // Votes for a dead tank no longer count.
+  for (const [voter, votedFor] of Object.entries(s.juryVotes)) {
+    if (votedFor === victim.id) delete s.juryVotes[voter];
+  }
+  log(`💥 ${attacker.name} destroyed ${victim.name}${loot}!`);
+  checkForWinner(s, log);
+}
+
 /**
- * Rounds mode: lock in everyone's orders and shuffle who goes first. Parries go up before anyone
- * acts — a parry predicts this round's shots, so it must not depend on the turn order.
+ * Rounds mode: lock in everyone's orders and shuffle who goes first. Stunned tanks sit the round
+ * out. Defenses and parries go up before anyone acts — they predict this round's shots, so they
+ * must not depend on the turn order.
  */
 function beginRound(s: GameState, rng: Rng, log: Log, now: number): void {
+  s.round += 1;
+  const sittingOut = livingTanks(s).filter((t) => t.stunned).map((t) => t.id);
+  for (const id of sittingOut) {
+    delete s.orders[id];
+    log(`💫 ${s.tanks[id]!.name} is stunned and sits round ${s.round} out.`, now);
+  }
   for (const [id, order] of Object.entries(s.orders)) {
-    if (order.type !== "parry") continue;
+    if (!GUARD_ORDERS.has(order.type)) continue;
     const error = perform(s, order, (text) => log(text, now));
-    if (error) log(`${s.tanks[id]?.name ?? "?"}'s parry was skipped: ${error}`, now);
+    if (error) log(`${s.tanks[id]?.name ?? "?"}'s ${order.type === "parry" ? "parry" : "defense"} was skipped: ${error}`, now);
     delete s.orders[id];
   }
   const turnOrder = rng.shuffle(livingTanks(s).map((t) => t.id)).filter((id) => s.orders[id]);
   const queue = turnOrder.map((id) => s.orders[id]!);
   s.orders = {};
   if (!queue.length) {
-    log("Nobody planned anything this round.", now);
-    endTick(s, rng, log, now);
+    finishRound(s, sittingOut, now); // nothing to play out
     return;
   }
-  s.nextTickAt = null; // the clock restarts once the round has played out
-  s.resolving = { turnOrder, queue, nextAt: now, done: null };
-  log(`Round ${s.tick + 1} plays out in this order: ${turnOrder.map((id) => s.tanks[id]!.name).join(" → ")}.`, now);
+  s.nextRoundAt = null; // the round clock restarts once the round has played out
+  s.resolving = { turnOrder, queue, nextAt: now, done: null, sittingOut };
+  log(`Round ${s.round} plays out in this order: ${turnOrder.map((id) => s.tanks[id]!.name).join(" → ")}.`, now);
+}
+
+/** Rounds mode: guards drop, the tanks that sat this round out recover, and planning starts again. */
+function finishRound(s: GameState, sittingOut: string[], now: number): void {
+  s.resolving = null;
+  for (const t of Object.values(s.tanks)) t.guard = null;
+  for (const id of sittingOut) if (s.tanks[id]) s.tanks[id].stunned = false;
+  s.nextRoundAt = now + s.config.roundIntervalMs;
 }
 
 /** AP income, the jury's bonus, heart spawns and the next tick's time. */
 function endTick(s: GameState, rng: Rng, log: Log, now: number): void {
   s.tick += 1;
-  for (const t of Object.values(s.tanks)) t.parrying = false; // parries last until the next tick
+  if (s.config.mode === "realtime") {
+    // In real time, guards and stuns last until the next tick (in rounds mode, until the round's end).
+    for (const t of Object.values(s.tanks)) Object.assign(t, { guard: null, stunned: false });
+  }
   for (const t of livingTanks(s)) t.ap += s.config.apPerTick;
 
   const tally = juryTally(s);
@@ -452,6 +531,7 @@ function checkForWinner(s: GameState, log: (text: string) => void): void {
   if (alive.length > 1) return;
   s.phase = "finished";
   s.nextTickAt = null;
+  s.nextRoundAt = null;
   s.winnerId = alive[0]?.id ?? null;
   log(alive[0] ? `🏆 ${alive[0].name} is the last tank standing!` : "Nobody survived.");
 }

@@ -111,7 +111,7 @@ describe("moving", () => {
 
 describe("shooting", () => {
   it("removes a heart from a tank in range", () => {
-    const s = ok(board([{ x: 0, y: 0, ap: 1 }, { x: 2, y: 2 }]), { type: "shoot", playerId: "p0", targetId: "p1" });
+    const s = ok(board([{ x: 0, y: 0, ap: 1 }, { x: 2, y: 2 }]), { type: "shoot", playerId: "p0", x: 2, y: 2 });
     assert.equal(s.tanks.p1!.hearts, 2);
     assert.equal(s.tanks.p0!.ap, 0);
   });
@@ -119,24 +119,33 @@ describe("shooting", () => {
   it("can't reach tanks outside range", () => {
     const s = board([{ x: 0, y: 0, ap: 1 }, { x: 3, y: 0 }]);
     assert.equal(distance(s.tanks.p0!, s.tanks.p1!), 3);
-    assert.match(err(s, { type: "shoot", playerId: "p0", targetId: "p1" }), /out of range/);
+    assert.match(err(s, { type: "shoot", playerId: "p0", x: 3, y: 0 }), /out of range/);
   });
 
   it("destroys a tank at 0 hearts and the killer takes its AP", () => {
     const s = ok(board([{ x: 0, y: 0, ap: 1 }, { x: 1, y: 1, hearts: 1, ap: 4 }, { x: 9, y: 9 }]), {
-      type: "shoot", playerId: "p0", targetId: "p1",
+      type: "shoot", playerId: "p0", x: 1, y: 1,
     });
     assert.equal(s.tanks.p1!.alive, false);
     assert.equal(s.tanks.p0!.ap, 4);
     assert.equal(s.phase, "playing");
-    assert.match(err(s, { type: "shoot", playerId: "p0", targetId: "p1" }), /already destroyed/);
+    assert.match(ok(s, { type: "shoot", playerId: "p0", x: 1, y: 1 }).log.at(-1)!.text, /wreck/, "shooting a wreck just wastes the shot");
   });
 
   it("ends the game when one tank is left", () => {
-    const s = ok(board([{ x: 0, y: 0, ap: 1 }, { x: 1, y: 1, hearts: 1 }]), { type: "shoot", playerId: "p0", targetId: "p1" });
+    const s = ok(board([{ x: 0, y: 0, ap: 1 }, { x: 1, y: 1, hearts: 1 }]), { type: "shoot", playerId: "p0", x: 1, y: 1 });
     assert.equal(s.phase, "finished");
     assert.equal(s.winnerId, "p0");
     assert.equal(s.nextTickAt, null);
+  });
+
+  it("is aimed at a square: an empty one is a miss, your own is off limits", () => {
+    const s = board([{ x: 0, y: 0, ap: 2 }, { x: 5, y: 5 }]);
+    const missed = ok(s, { type: "shoot", playerId: "p0", x: 1, y: 1 });
+    assert.equal(missed.tanks.p0!.ap, 1);
+    assert.match(missed.log.at(-1)!.text, /B2 missed/);
+    assert.match(err(s, { type: "shoot", playerId: "p0", x: 0, y: 0 }), /own square/);
+    assert.match(err(s, { type: "shoot", playerId: "p0", x: -1, y: 0 }), /off the board/);
   });
 
   it("dead tanks can't act", () => {
@@ -230,12 +239,13 @@ describe("ticks and the jury", () => {
 
 describe("rounds mode", () => {
   const rounds = (tanks: Array<Partial<Tank> & { x: number; y: number }>, config: Partial<GameConfig> = {}) =>
-    board(tanks, { mode: "rounds", tickIntervalMs: 30_000, ...config });
+    board(tanks, { mode: "rounds", tickIntervalMs: 30_000, roundIntervalMs: 10_000, ...config });
   const order = (s: GameState, playerId: string, o: OrderAction) => ok(s, { type: "order", playerId, order: o });
+  const endRound = (s: GameState, now = 2000) => ok(s, { type: "endRound", now });
 
-  /** End the round (if it hasn't ended yet) and play every step out; returns the state after income. */
+  /** End the round (if it hasn't ended yet) and play every step out. */
   function playRound(s: GameState, now = 2000): GameState {
-    if (!s.resolving) s = tick(s, now);
+    if (!s.resolving) s = endRound(s, now);
     for (let i = 0; s.resolving && i < 100; i++) s = ok(s, { type: "resolveStep", now: now + i * 1000 });
     assert.equal(s.resolving, null, "the round should finish");
     return s;
@@ -243,10 +253,10 @@ describe("rounds mode", () => {
 
   it("turns direct actions into a planned order", () => {
     const s = rounds([{ x: 0, y: 0, ap: 3 }, { x: 1, y: 1 }]);
-    assert.match(err(s, { type: "shoot", playerId: "p0", targetId: "p1" }), /Plan your orders/);
-    const planned = order(s, "p0", { type: "shoot", playerId: "p0", targetId: "p1" });
+    assert.match(err(s, { type: "shoot", playerId: "p0", x: 1, y: 1 }), /Plan your orders/);
+    const planned = order(s, "p0", { type: "shoot", playerId: "p0", x: 1, y: 1 });
     assert.equal(planned.tanks.p1!.hearts, 3, "nothing happens until the round ends");
-    assert.deepEqual(planned.orders.p0, { type: "shoot", playerId: "p0", targetId: "p1" });
+    assert.deepEqual(planned.orders.p0, { type: "shoot", playerId: "p0", x: 1, y: 1 });
     assert.match(err(board([{ x: 0, y: 0 }, { x: 1, y: 1 }]), { type: "order", playerId: "p0", order: { type: "upgradeRange", playerId: "p0" } }), /real time/);
   });
 
@@ -262,7 +272,7 @@ describe("rounds mode", () => {
 
   it("checks the order against the board as it is now", () => {
     const s = rounds([{ x: 0, y: 0, ap: 2 }, { x: 3, y: 0 }]);
-    assert.match(err(s, { type: "order", playerId: "p0", order: { type: "shoot", playerId: "p0", targetId: "p1" } }), /out of range/);
+    assert.match(err(s, { type: "order", playerId: "p0", order: { type: "shoot", playerId: "p0", x: 3, y: 0 } }), /out of range/);
     assert.match(err(s, { type: "order", playerId: "p0", order: { type: "upgradeRange", playerId: "p0" } }), /3 AP/);
     const planned = order(s, "p0", { type: "move", playerId: "p0", dx: 1, dy: 0 });
     assert.deepEqual(projectOrders(planned, "p0").tanks.p0, { ...planned.tanks.p0!, x: 1, ap: 1 });
@@ -274,24 +284,31 @@ describe("rounds mode", () => {
     assert.equal(s.orders.p1, undefined);
   });
 
-  it("plays the orders out one step at a time, then pays AP", () => {
+  it("runs rounds on their own clock, separate from the AP ticks", () => {
     let s = rounds([{ x: 0, y: 0, ap: 1 }, { x: 5, y: 5, ap: 3 }]);
+    assert.equal(s.nextRoundAt, 1000 + 10_000, "rounds are 10s");
+    assert.equal(s.nextTickAt, 1000 + 30_000, "AP comes every 30s");
     s = order(s, "p0", { type: "move", playerId: "p0", dx: 1, dy: 0 });
     s = order(s, "p1", { type: "upgradeRange", playerId: "p1" });
-    s = tick(s);
+    s = endRound(s, 11_000);
     assert.ok(s.resolving);
+    assert.equal(s.round, 1);
     assert.equal(s.resolving.turnOrder.length, 2);
-    assert.equal(s.nextTickAt, null, "the clock waits while the round plays out");
+    assert.equal(s.nextRoundAt, null, "the round clock waits while the round plays out");
+    assert.equal(s.nextTickAt, 31_000, "the AP clock doesn't");
     assert.deepEqual(s.orders, {});
-    s = ok(s, { type: "resolveStep", now: 2000 });
+    s = ok(s, { type: "resolveStep", now: 11_000 });
     assert.ok(s.resolving!.done, "the first order happened");
-    assert.match(err(s, { type: "resolveStep", now: 2100 }), /Not yet/, "steps are spaced out");
-    s = playRound(s, 3000);
+    assert.match(err(s, { type: "resolveStep", now: 11_100 }), /Not yet/, "steps are spaced out");
+    s = playRound(s, 12_000);
     assert.equal(s.tanks.p0!.x, 1);
     assert.equal(s.tanks.p1!.range, 3);
-    assert.equal(s.tick, 1);
-    assert.equal(s.tanks.p0!.ap, 1, "income arrives after the round");
-    assert.ok(s.nextTickAt! > 3000);
+    assert.equal(s.tick, 0, "no AP for finishing a round");
+    assert.equal(s.tanks.p0!.ap, 0);
+    assert.ok(s.nextRoundAt! > 12_000, "the next round's planning has started");
+    s = tick(s, 31_000);
+    assert.equal(s.tanks.p0!.ap, 1, "AP arrives on its own tick");
+    assert.match(err(board([{ x: 0, y: 0 }, { x: 5, y: 5 }]), { type: "endRound", now: 0 }), /No round/);
   });
 
   it("plays players in a random order, which can decide who shoots first", () => {
@@ -300,8 +317,8 @@ describe("rounds mode", () => {
     for (let seed = 0; seed < 20; seed++) {
       let s = rounds([{ x: 0, y: 0, ap: 1, hearts: 1 }, { x: 1, y: 0, ap: 1, hearts: 1 }, { x: 9, y: 9 }]);
       s.rng = seed;
-      s = order(s, "p0", { type: "shoot", playerId: "p0", targetId: "p1" });
-      s = order(s, "p1", { type: "shoot", playerId: "p1", targetId: "p0" });
+      s = order(s, "p0", { type: "shoot", playerId: "p0", x: 1, y: 0 });
+      s = order(s, "p1", { type: "shoot", playerId: "p1", x: 0, y: 0 });
       s = playRound(s);
       const alive = ["p0", "p1"].filter((id) => s.tanks[id]!.alive);
       assert.equal(alive.length, 1, "the second shooter was destroyed before acting");
@@ -310,22 +327,22 @@ describe("rounds mode", () => {
     assert.deepEqual([...winners].sort(), ["p0", "p1"]);
   });
 
-  it("skips an order that no longer works by its turn, at no cost", () => {
-    // p0 plans to shoot p1; p1 plans to drive out of range. Who goes first decides it.
+  it("misses if the target has left the square by the time the shot fires", () => {
+    // p0 aims at p1's square; p1 plans to drive off it. Who goes first decides it.
     const seen = new Set<string>();
     for (let seed = 0; seed < 20; seed++) {
       let s = rounds([{ x: 0, y: 0, ap: 1 }, { x: 2, y: 0, ap: 1 }, { x: 9, y: 9 }]);
       s.rng = seed;
-      s = order(s, "p0", { type: "shoot", playerId: "p0", targetId: "p1" });
+      s = order(s, "p0", { type: "shoot", playerId: "p0", x: 2, y: 0 });
       s = order(s, "p1", { type: "move", playerId: "p1", dx: 1, dy: 0 });
-      s = tick(s);
+      s = endRound(s);
       const first = s.resolving!.turnOrder[0]!;
       seen.add(first);
       s = playRound(s);
       if (first === "p1") {
         assert.equal(s.tanks.p1!.hearts, 3, "p1 got away");
-        assert.equal(s.tanks.p0!.ap, 1 + 1, "the skipped shot cost nothing");
-        assert.ok(s.log.some((e) => /skipped/.test(e.text)));
+        assert.equal(s.tanks.p0!.ap, 0, "a miss still costs the AP");
+        assert.ok(s.log.some((e) => /missed/.test(e.text)));
       } else {
         assert.equal(s.tanks.p1!.hearts, 2, "hit before it could move");
         assert.equal(s.tanks.p1!.x, 3);
@@ -334,18 +351,19 @@ describe("rounds mode", () => {
     assert.equal(seen.size, 2, "both turn orders came up");
   });
 
-  it("goes straight to the next tick when nobody planned anything", () => {
-    const s = tick(rounds([{ x: 0, y: 0 }, { x: 5, y: 5 }]));
+  it("starts the next round straight away when nobody planned anything", () => {
+    const s = endRound(rounds([{ x: 0, y: 0 }, { x: 5, y: 5 }]), 11_000);
     assert.equal(s.resolving, null);
-    assert.equal(s.tick, 1);
+    assert.equal(s.round, 1);
+    assert.equal(s.nextRoundAt, 21_000);
   });
 
   it("keeps everyone's orders secret from the others", () => {
     let s = rounds([{ x: 0, y: 0, ap: 1 }, { x: 1, y: 1, ap: 1 }]);
-    s = order(s, "p0", { type: "shoot", playerId: "p0", targetId: "p1" });
-    s = order(s, "p1", { type: "shoot", playerId: "p1", targetId: "p0" });
+    s = order(s, "p0", { type: "shoot", playerId: "p0", x: 1, y: 1 });
+    s = order(s, "p1", { type: "shoot", playerId: "p1", x: 0, y: 0 });
     assert.deepEqual(Object.keys(viewFor(s, "p0").orders), ["p0"]);
-    const resolving = viewFor(tick(s), "p0").resolving!;
+    const resolving = viewFor(endRound(s), "p0").resolving!;
     assert.equal(resolving.turnOrder.length, 2, "the turn order is public");
     assert.ok(resolving.queue.every((o) => o.playerId === "p0"));
     assert.equal(publicCause({ type: "order", playerId: "p0", order: { type: "upgradeRange", playerId: "p0" } }), null);
@@ -353,48 +371,130 @@ describe("rounds mode", () => {
   });
 });
 
-describe("parry", () => {
-  const shoot = (s: GameState, from = "p0", to = "p1") => ok(s, { type: "shoot", playerId: from, targetId: to });
+describe("defense and parry", () => {
+  /** p0 (3 AP) shoots at p1's square (1,1). */
+  const shoot = (s: GameState) => ok(s, { type: "shoot", playerId: "p0", x: 1, y: 1 });
+  /** p1 has raised a defense or readied a parry. */
+  const guarded = (guard: "defend" | "parry", config: Partial<GameConfig> = {}) =>
+    ok(board([{ x: 0, y: 0, ap: 3 }, { x: 1, y: 1, ap: 2 }, { x: 9, y: 9 }], config), { type: guard, playerId: "p1" });
 
-  it("costs 1 AP; a shot at a parrying tank does no damage and the shooter loses 1 AP to it", () => {
-    let s = board([{ x: 0, y: 0, ap: 3 }, { x: 1, y: 1, ap: 1 }]);
-    s = ok(s, { type: "parry", playerId: "p1" });
+  it("defense costs 1 AP and blocks every shot until the tick, nothing more", () => {
+    let s = guarded("defend");
+    assert.equal(s.tanks.p1!.ap, 1);
+    assert.equal(s.tanks.p1!.guard, "defense");
+    s = shoot(s);
+    s = shoot(s);
+    assert.equal(s.tanks.p1!.hearts, 3, "no damage");
+    assert.equal(s.tanks.p0!.ap, 1, "just the two shots");
+    assert.equal(s.tanks.p0!.stunned, false);
+    assert.match(s.log.at(-1)!.text, /defense blocked/);
+  });
+
+  it("parry costs 2 AP, blocks the shot, takes 1 AP and stuns the shooter by default", () => {
+    let s = guarded("parry");
     assert.equal(s.tanks.p1!.ap, 0);
-    assert.equal(s.tanks.p1!.parrying, true);
+    assert.equal(s.tanks.p1!.guard, "parry");
     s = shoot(s);
     assert.equal(s.tanks.p1!.hearts, 3, "no damage");
     assert.equal(s.tanks.p0!.ap, 3 - 1 - 1, "the shot plus the stolen AP");
     assert.equal(s.tanks.p1!.ap, 1);
+    assert.equal(s.tanks.p0!.stunned, true);
+    assert.equal(s.tanks.p0!.hearts, 3, "no counter-hit unless the rules ask for one");
+    assert.match(err(s, { type: "upgradeRange", playerId: "p0" }), /stunned/);
     assert.match(s.log.at(-1)!.text, /parried/);
+  });
+
+  it("lets the rules tune the parry: AP taken, stun, and a counter-hit that can destroy the shooter", () => {
+    const tuned = shoot(guarded("parry", { parrySteal: 2, parryStuns: false }));
+    assert.equal(tuned.tanks.p0!.ap, 0);
+    assert.equal(tuned.tanks.p0!.stunned, false);
+    let s = guarded("parry", { parryDamage: 1 });
+    s.tanks.p0!.hearts = 1;
     s = shoot(s);
-    assert.equal(s.tanks.p1!.hearts, 3, "it holds for every shot until the tick");
-    assert.equal(s.tanks.p0!.ap, 0, "nothing left to steal");
+    assert.equal(s.tanks.p0!.alive, false);
+    assert.equal(s.tanks.p1!.ap, 0 + 1 + 1, "stolen AP, then the killer's loot");
   });
 
-  it("can't be stacked or bought without AP, and wears off at the tick", () => {
-    let s = board([{ x: 0, y: 0, ap: 2 }, { x: 1, y: 1, ap: 0 }]);
-    assert.match(err(s, { type: "parry", playerId: "p1" }), /1 AP/);
-    s = ok(s, { type: "parry", playerId: "p0" });
-    assert.match(err(s, { type: "parry", playerId: "p0" }), /already/);
+  it("can't stack guards or buy one without the AP, and they wear off at the tick", () => {
+    let s = board([{ x: 0, y: 0, ap: 2 }, { x: 1, y: 1, ap: 1 }]);
+    assert.match(err(s, { type: "parry", playerId: "p1" }), /2 AP/);
+    s = ok(s, { type: "defend", playerId: "p0" });
+    assert.match(err(s, { type: "parry", playerId: "p0" }), /already braced/);
     s = tick(s);
-    assert.equal(s.tanks.p0!.parrying, false);
-    assert.equal(shoot(s, "p1", "p0").tanks.p0!.hearts, 2, "a hit lands again after the tick");
+    assert.equal(s.tanks.p0!.guard, null);
+    assert.equal(ok(s, { type: "shoot", playerId: "p1", x: 0, y: 0 }).tanks.p0!.hearts, 2, "a hit lands again after the tick");
   });
 
-  it("in rounds mode goes up before anyone acts, whatever the turn order", () => {
+  it("in rounds mode goes up before anyone acts, whatever the turn order, and lasts the round", () => {
     for (let seed = 0; seed < 10; seed++) {
-      let s = board([{ x: 0, y: 0, ap: 2 }, { x: 1, y: 1, ap: 1 }], { mode: "rounds", tickIntervalMs: 10_000 });
+      let s = board([{ x: 0, y: 0, ap: 2 }, { x: 1, y: 1, ap: 1 }], { mode: "rounds" });
       s.rng = seed;
-      s = ok(s, { type: "order", playerId: "p0", order: { type: "shoot", playerId: "p0", targetId: "p1" } });
-      s = ok(s, { type: "order", playerId: "p1", order: { type: "parry", playerId: "p1" } });
-      s = tick(s);
-      assert.equal(s.tanks.p1!.parrying, true, "raised as the round begins");
-      assert.deepEqual(s.resolving!.turnOrder, ["p0"], "a parry isn't a turn of its own");
+      s = ok(s, { type: "order", playerId: "p0", order: { type: "shoot", playerId: "p0", x: 1, y: 1 } });
+      s = ok(s, { type: "order", playerId: "p1", order: { type: "defend", playerId: "p1" } });
+      s = ok(s, { type: "endRound", now: 3000 });
+      assert.equal(s.tanks.p1!.guard, "defense", "raised as the round begins");
+      assert.deepEqual(s.resolving!.turnOrder, ["p0"], "a guard isn't a turn of its own");
       for (let i = 0; s.resolving && i < 10; i++) s = ok(s, { type: "resolveStep", now: 3000 + i * 1000 });
       assert.equal(s.tanks.p1!.hearts, 3);
-      assert.equal(s.tanks.p0!.ap, 0 + 1, "lost the shot and the parry's AP, then got income");
-      assert.equal(s.tanks.p1!.parrying, false, "gone for the next round");
+      assert.equal(s.tanks.p1!.guard, null, "gone for the next round");
     }
+  });
+
+  it("in rounds mode a stunned shooter sits the next round out, then recovers", () => {
+    let s = board([{ x: 0, y: 0, ap: 5 }, { x: 1, y: 1, ap: 2 }], { mode: "rounds" });
+    const play = (state: GameState, now: number) => {
+      state = ok(state, { type: "endRound", now });
+      for (let i = 0; state.resolving && i < 10; i++) state = ok(state, { type: "resolveStep", now: now + i * 1000 });
+      return state;
+    };
+    s = ok(s, { type: "order", playerId: "p0", order: { type: "shoot", playerId: "p0", x: 1, y: 1 } });
+    s = ok(s, { type: "order", playerId: "p1", order: { type: "parry", playerId: "p1" } });
+    s = play(s, 3000);
+    assert.equal(s.tanks.p0!.stunned, true, "still stunned after the round it was parried in");
+    assert.match(err(s, { type: "order", playerId: "p0", order: { type: "upgradeRange", playerId: "p0" } }), /stunned/);
+    s = play(s, 20_000);
+    assert.ok(s.log.some((e) => /sits round 2 out/.test(e.text)));
+    assert.equal(s.tanks.p0!.stunned, false, "recovered once it had sat a round out");
+    ok(s, { type: "order", playerId: "p0", order: { type: "upgradeRange", playerId: "p0" } });
+  });
+});
+
+describe("healing", () => {
+  it("repairs 1 heart for 3 AP, up to the starting hearts", () => {
+    let s = board([{ x: 0, y: 0, ap: 7, hearts: 1 }, { x: 5, y: 5 }]);
+    s = ok(s, { type: "heal", playerId: "p0" });
+    assert.equal(s.tanks.p0!.hearts, 2);
+    assert.equal(s.tanks.p0!.ap, 4);
+    s = ok(s, { type: "heal", playerId: "p0" });
+    assert.match(err(s, { type: "heal", playerId: "p0" }), /up to 3/);
+    assert.match(err(board([{ x: 0, y: 0, ap: 2, hearts: 1 }, { x: 5, y: 5 }]), { type: "heal", playerId: "p0" }), /3 AP/);
+  });
+
+  it("follows the rules' cost and switch, and can be planned in rounds", () => {
+    const cheap = board([{ x: 0, y: 0, ap: 1, hearts: 1 }, { x: 5, y: 5 }], { healCost: 1 });
+    assert.equal(ok(cheap, { type: "heal", playerId: "p0" }).tanks.p0!.hearts, 2);
+    const off = board([{ x: 0, y: 0, ap: 9, hearts: 1 }, { x: 5, y: 5 }], { allowHeal: false });
+    assert.match(err(off, { type: "heal", playerId: "p0" }), /disabled/);
+    const rounds = board([{ x: 0, y: 0, ap: 3, hearts: 1 }, { x: 5, y: 5 }], { mode: "rounds" });
+    ok(rounds, { type: "order", playerId: "p0", order: { type: "heal", playerId: "p0" } });
+  });
+});
+
+describe("kicking", () => {
+  it("lets the host remove a player from the lobby", () => {
+    const s = ok(lobby(["Ana", "Bia", "Caio"]), { type: "kick", playerId: "p0", targetId: "p1" });
+    assert.deepEqual(s.order, ["p0", "p2"]);
+    assert.equal(s.tanks.p1, undefined);
+    assert.match(s.log.at(-1)!.text, /Bia was removed/);
+  });
+
+  it("is only for the host, not on themselves, and only in the lobby", () => {
+    const s = lobby(["Ana", "Bia"]);
+    assert.match(err(s, { type: "kick", playerId: "p1", targetId: "p0" }), /host/);
+    assert.match(err(s, { type: "kick", playerId: "p0", targetId: "p0" }), /yourself/);
+    assert.match(err(s, { type: "kick", playerId: "p0", targetId: "nobody" }), /isn't in/);
+    const started = ok(s, { type: "start", playerId: "p0", now: 0 });
+    assert.match(err(started, { type: "kick", playerId: "p0", targetId: "p1" }), /lobby/);
   });
 });
 
@@ -429,7 +529,7 @@ describe("changing the rules in the lobby", () => {
 });
 
 describe("rematch", () => {
-  const finished = () => ok(board([{ x: 0, y: 0, ap: 3 }, { x: 1, y: 1, hearts: 1 }]), { type: "shoot", playerId: "p0", targetId: "p1" });
+  const finished = () => ok(board([{ x: 0, y: 0, ap: 3 }, { x: 1, y: 1, hearts: 1 }]), { type: "shoot", playerId: "p0", x: 1, y: 1 });
 
   it("puts everyone back in the lobby with fresh tanks, keeping players and rules", () => {
     const s = ok(finished(), { type: "rematch", playerId: "p0" });
@@ -450,7 +550,7 @@ describe("rematch", () => {
     s.tanks.p1!.hearts = 1;
     s.tanks.p0!.ap = 1;
     Object.assign(s.tanks.p1!, { x: s.tanks.p0!.x === 0 ? 1 : s.tanks.p0!.x - 1, y: s.tanks.p0!.y });
-    s = ok(s, { type: "shoot", playerId: "p0", targetId: "p1" });
+    s = ok(s, { type: "shoot", playerId: "p0", x: s.tanks.p1!.x, y: s.tanks.p1!.y });
     s = ok(s, { type: "rematch", playerId: "p0" });
     assert.equal(s.config.width, 0);
     for (let i = 2; i < 6; i++) s = ok(s, { type: "join", playerId: `p${i}`, name: `New${i}` });
@@ -468,7 +568,7 @@ describe("purity", () => {
   it("never mutates the input state", () => {
     const s = board([{ x: 0, y: 0, ap: 1 }, { x: 1, y: 1 }]);
     const snapshot = structuredClone(s);
-    applyAction(s, { type: "shoot", playerId: "p0", targetId: "p1" });
+    applyAction(s, { type: "shoot", playerId: "p0", x: 1, y: 1 });
     applyAction(s, { type: "tick", now: 5000 });
     assert.deepEqual(s, snapshot);
   });

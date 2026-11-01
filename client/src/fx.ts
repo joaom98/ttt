@@ -13,6 +13,9 @@ interface Point {
   y: number;
 }
 
+/** A board square (x, y in squares, not pixels). */
+type Square = Point;
+
 export function animateChange(prev: GameState | undefined, next: GameState, cause: Action | null, root: HTMLElement): void {
   if (!prev || prev.id !== next.id || prev.phase !== "playing" || reduceMotion.matches || document.hidden) return;
   const board = new Board(root);
@@ -30,18 +33,26 @@ export function animateChange(prev: GameState | undefined, next: GameState, caus
       return;
     }
     case "shoot": {
-      const target = next.tanks[cause.targetId];
+      // Shots are aimed at a square: who (if anyone) was on it decides how it ends.
       const shooter = next.tanks[cause.playerId];
-      if (!target || !shooter) return;
-      if (prev.tanks[cause.targetId]?.parrying) {
-        const stolen = target.ap - (prev.tanks[cause.targetId]?.ap ?? target.ap);
-        return board.parried(shooter.id, target.id, shooter.color, stolen);
+      if (!shooter) return;
+      const sq = { x: cause.x, y: cause.y };
+      const victim = Object.values(prev.tanks).find((t) => t.alive && t.x === sq.x && t.y === sq.y);
+      if (!victim) return board.missed(shooter.id, sq, shooter.color);
+      const after = next.tanks[victim.id]!;
+      if (victim.guard) {
+        const stolen = after.ap - victim.ap;
+        return board.blocked(shooter.id, sq, victim.id, shooter.color, victim.guard === "parry", stolen);
       }
-      board.shot(shooter.id, target.id, shooter.color, !target.alive);
+      board.shot(shooter.id, sq, victim.id, shooter.color, !after.alive);
       return;
     }
+    case "defend":
+      return board.float(cause.playerId, "🛡️ Defend!", "ap");
     case "parry":
-      return board.float(cause.playerId, "🛡️ Parry!", "ap");
+      return board.float(cause.playerId, "⚔️ Parry!", "ap");
+    case "heal":
+      return board.float(cause.playerId, "+1 ♥", "heart");
     case "giveAP":
       return board.gift(cause.playerId, cause.targetId, "+1 AP", "ap");
     case "giveHeart":
@@ -134,9 +145,9 @@ class Board {
     );
   }
 
-  /** A tracer arrow from shooter to target and a shell along it; the hit (or the explosion). */
-  shot(fromId: string, toId: string, color: string, destroyed: boolean): void {
-    this.fire(fromId, toId, color, (b) => {
+  /** A tracer arrow from shooter to the square and a shell along it; the hit (or the explosion). */
+  shot(fromId: string, sq: Square, toId: string, color: string, destroyed: boolean): void {
+    this.fire(fromId, sq, color, (b) => {
       // The board may have been rebuilt meanwhile, so look the target up again.
       this.tank(toId)?.animate(
         [
@@ -161,11 +172,25 @@ class Board {
     });
   }
 
-  /** The same shot, turned away: a shield flash, "Parried!", and the stolen AP flying to the defender. */
-  parried(fromId: string, toId: string, color: string, stolen: number): void {
-    this.fire(fromId, toId, color, (b) => {
+  /** A shot at an empty square: a puff of dust and "Miss!". */
+  missed(fromId: string, sq: Square, color: string): void {
+    this.fire(fromId, sq, color, (b) => {
+      const puff = spawn("fx-boom", b, 700);
+      puff.textContent = "💨";
+      puff.style.fontSize = `${this.pitch() * 0.8}px`;
+      puff.animate(
+        [{ transform: "translate(-50%, -50%) scale(0.4)", opacity: 0.9 }, { transform: "translate(-50%, -60%) scale(1.2)", opacity: 0 }],
+        { duration: 650, easing: "ease-out" },
+      );
+      spawn("fx-float miss", { x: b.x, y: b.y - this.pitch() * 0.35 }, 1100).textContent = "Miss!";
+    });
+  }
+
+  /** The shot, turned away: a shield (defense) or crossed swords (parry), and any stolen AP flying over. */
+  blocked(fromId: string, sq: Square, toId: string, color: string, parry: boolean, stolen: number): void {
+    this.fire(fromId, sq, color, (b) => {
       const shield = spawn("fx-boom", b, 700);
-      shield.textContent = "🛡️";
+      shield.textContent = parry ? "⚔️" : "🛡️";
       shield.style.fontSize = `${this.pitch() * 1.1}px`;
       shield.animate(
         [{ transform: "translate(-50%, -50%) scale(0.6)", opacity: 1 }, { transform: "translate(-50%, -50%) scale(1.25)", opacity: 1, offset: 0.4 }, { transform: "translate(-50%, -50%) scale(1.4)", opacity: 0 }],
@@ -175,16 +200,17 @@ class Board {
         [{ transform: "scale(1)" }, { transform: "scale(1.15)", filter: "brightness(1.4)" }, { transform: "scale(1)" }],
         { duration: 350, easing: "ease-out" },
       );
-      this.float(toId, "Parried!", "ap");
+      this.float(toId, parry ? "Parried!" : "Blocked!", "ap");
       if (stolen > 0) setTimeout(() => this.gift(fromId, toId, `+${stolen} AP`, "ap"), 350);
     });
   }
 
-  /** Tracer and shell from one tank to another; calls `impact` with the target's centre when it lands. */
-  fire(fromId: string, toId: string, color: string, impact: (at: Point) => void): void {
+  /** Tracer and shell from a tank to a square; calls `impact` with the square's centre when it lands. */
+  fire(fromId: string, sq: Square, color: string, impact: (at: Point) => void): void {
     const a = this.centerOf(fromId);
-    const b = this.centerOf(toId);
-    if (!a || !b) return;
+    const target = this.cell(sq.x, sq.y);
+    if (!a || !target) return;
+    const b = center(target);
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const length = Math.hypot(dx, dy);

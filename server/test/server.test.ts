@@ -198,8 +198,8 @@ describe("bots", () => {
 });
 
 describe("rounds mode", () => {
-  it("ends the round on the timer, then plays the orders out step by step", async () => {
-    const host = (await api("/api/games", { name: "Ana", preset: "rounds", config: { startingAP: 2 } })).json;
+  it("ends the round on its own timer, plays the orders out step by step, and pays AP on the AP clock", async () => {
+    const host = (await api("/api/games", { name: "Ana", preset: "rounds", config: { startingAP: 2, tickIntervalMs: 60_000 } })).json;
     const { gameId } = host;
     const guest = (await api(`/api/games/${gameId}/join`, { name: "Bia" })).json;
     const act = (who: { token: string }, action: unknown) => api(`/api/games/${gameId}/actions`, { token: who.token, action });
@@ -209,7 +209,7 @@ describe("rounds mode", () => {
     Object.assign(s.tanks[host.playerId]!, { x: 0, y: 0 });
     Object.assign(s.tanks[guest.playerId]!, { x: 2, y: 0 });
 
-    assert.equal((await act(host, { type: "order", order: { type: "shoot", targetId: guest.playerId } })).status, 200);
+    assert.equal((await act(host, { type: "order", order: { type: "shoot", x: 2, y: 0 } })).status, 200);
     assert.equal((await act(guest, { type: "order", order: { type: "upgradeRange" } })).status, 400, "not enough AP");
     // The guest can't see the host's order.
     const guestView = (await api(`/api/games/${gameId}?token=${guest.token}`)).json as StateMessage;
@@ -225,9 +225,27 @@ describe("rounds mode", () => {
     store.runDueTicks(); // too soon for the next step
     assert.ok(store.get(gameId)!.resolving);
     clock += 1000;
-    store.runDueTicks(); // round over: AP income
+    store.runDueTicks(); // round over — no AP for that
     assert.equal(store.get(gameId)!.resolving, null);
+    assert.equal(store.get(gameId)!.round, 1);
+    assert.equal(store.get(gameId)!.tick, 0);
+    clock += 60_000;
+    store.runDueTicks(); // the AP clock, in its own time
     assert.equal(store.get(gameId)!.tick, 1);
+  });
+
+  it("lets the host kick a player, whose seat stops working", async () => {
+    const host = (await api("/api/games", { name: "Ana", bots: ["turtle"] })).json;
+    const guest = (await api(`/api/games/${host.gameId}/join`, { name: "Bia" })).json;
+    const kick = (who: { token: string }, targetId: string) =>
+      api(`/api/games/${host.gameId}/actions`, { token: who.token, action: { type: "kick", targetId } });
+    assert.equal((await kick(guest, host.playerId)).status, 400, "only the host");
+    assert.equal((await kick(host, guest.playerId)).status, 200);
+    assert.equal(store.playerForToken(host.gameId, guest.token), null);
+    const botId = Object.keys(store.botsOf(host.gameId))[0]!;
+    assert.equal((await kick(host, botId)).status, 200, "bots can be kicked too");
+    assert.deepEqual(store.botsOf(host.gameId), {});
+    assert.deepEqual(store.get(host.gameId)!.order, [host.playerId]);
   });
 
   it("has bots plan an order for the round", async () => {

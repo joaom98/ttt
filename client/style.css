@@ -127,8 +127,11 @@ nav.top { display: flex; justify-content: space-between; margin-bottom: 12px; }
 .hud .stat b { font-size: 18px; }
 .hud-me { display: inline-flex; align-items: center; padding: 4px 10px; }
 .clock { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-.clock.resolving { flex-wrap: wrap; font-size: 14px; }
-.clock.resolving .current { font-weight: 800; color: var(--accent); }
+.clock.two { flex-wrap: wrap; gap: 4px 14px; justify-content: flex-end; }
+.clock .resolving { font-size: 14px; }
+.clock .resolving .current { font-weight: 800; color: var(--accent); }
+.hud .stat.stunned { color: var(--danger); font-weight: 700; }
+.hud .stat.guard { font-weight: 700; }
 
 /* Rounds mode: this round's order, the planned move's ghost tank, and order marks */
 .plan-bar {
@@ -137,6 +140,13 @@ nav.top { display: flex; justify-content: space-between; margin-bottom: 12px; }
 }
 .plan-bar.has-order b { color: var(--accent); }
 .cell.planned { background: color-mix(in srgb, var(--panel) 70%, var(--accent)); }
+/* Where your planned shot will land. */
+.cell.aimed { outline: 2px dashed var(--danger); outline-offset: -3px; }
+.cell .aim-mark { position: absolute; font-size: calc(var(--cell) * 0.45); opacity: 0.85; pointer-events: none; }
+.cell.in-range:not(.has-tank):not(.can-move) { cursor: crosshair; }
+/* Hovering a tank shows the squares it can reach. */
+.cell.hover-range { box-shadow: inset 0 0 0 2px var(--hc); background: color-mix(in srgb, var(--panel) 78%, var(--hc)); }
+.cell.hover-origin { box-shadow: inset 0 0 0 2px var(--hc); }
 .tank.ghost { opacity: 0.45; outline: 2px dashed var(--c); outline-offset: -2px; box-shadow: none; }
 .cell .order-mark {
   position: absolute; top: -6px; right: -6px; z-index: 1;
@@ -210,13 +220,17 @@ nav.top { display: flex; justify-content: space-between; margin-bottom: 12px; }
 }
 .tank.mine { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text); }
 .tank.wreck { filter: grayscale(1) brightness(0.55); }
-/* Braced for a hit: a shield badge and a pale glow. */
+/* Guards: a blue glow and shield for a defense, a gold glow and crossed swords for a parry. Stunned: dizzy. */
 .tank { position: relative; }
-.tank.parrying { box-shadow: 0 0 0 3px #3b9cff, 0 0 14px 4px rgba(59, 156, 255, 0.7); }
-.tank.parrying::after {
-  content: "🛡️"; position: absolute; left: -6px; bottom: -6px;
-  font-size: max(10px, calc(var(--cell) * 0.28)); line-height: 1;
+.tank.guard-defense { box-shadow: 0 0 0 3px #3b9cff, 0 0 14px 4px rgba(59, 156, 255, 0.7); }
+.tank.guard-parry { box-shadow: 0 0 0 3px #f2b705, 0 0 14px 4px rgba(242, 183, 5, 0.7); }
+.tank.guard-defense::after, .tank.guard-parry::after, .tank.stunned::before {
+  position: absolute; line-height: 1; font-size: max(10px, calc(var(--cell) * 0.28));
 }
+.tank.guard-defense::after { content: "🛡️"; left: -6px; bottom: -6px; }
+.tank.guard-parry::after { content: "⚔️"; left: -6px; bottom: -6px; }
+.tank.stunned::before { content: "💫"; right: -6px; top: -6px; }
+.tank.stunned { filter: saturate(0.5); }
 .tank .initials { font-weight: 800; font-size: calc(var(--cell) * 0.3); }
 .tank .hp { font-size: calc(var(--cell) * 0.18); margin-top: 2px; color: #7a0010; letter-spacing: -1px; }
 .hint { margin-top: 8px; }
@@ -297,6 +311,7 @@ nav.top { display: flex; justify-content: space-between; margin-bottom: 12px; }
   animation: fx-rise 1s ease-out forwards;
 }
 .fx-float.damage { color: var(--danger); }
+.fx-float.miss { color: var(--muted); }
 @keyframes fx-rise {
   0% { transform: translate(-50%, -30%) scale(0.7); opacity: 0; }
   15% { transform: translate(-50%, -60%) scale(1.15); opacity: 1; }

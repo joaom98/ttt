@@ -79,6 +79,8 @@ export const api = {
     call<{ ok: true }>(`/api/games/${session.gameId}/bots/remove`, { token: session.token, playerId }),
   forceTick: (session: Session) =>
     call<{ ok: true }>(`/api/games/${session.gameId}/debug/tick`, { token: session.token }),
+  forceRound: (session: Session) =>
+    call<{ ok: true }>(`/api/games/${session.gameId}/debug/round`, { token: session.token }),
 };
 
 /** Live state stream. EventSource reconnects by itself if the connection drops. */

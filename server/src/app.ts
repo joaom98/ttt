@@ -8,7 +8,8 @@
 //   POST /api/games/:id/chat           { token, text, to? }              (to = player id for a private message)
 //   POST /api/games/:id/bots           { token, personality }            (host, lobby only)
 //   POST /api/games/:id/bots/remove    { token, playerId }               (host, lobby only)
-//   POST /api/games/:id/debug/tick     { token }                         (host, debug games only)
+//   POST /api/games/:id/debug/tick     { token }                         AP tick now (host, debug games only)
+//   POST /api/games/:id/debug/round    { token }                         end the round now (same)
 //   GET  /api/games/:id/events?token=  text/event-stream of StateMessage
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -85,6 +86,7 @@ export function createApp(store: GameStore, rootDir: string, now: () => number =
         return done(res, store.removeBot(gameId, token, typeof body.playerId === "string" ? body.playerId : ""));
       }
       if (sub === "debug/tick") return done(res, store.forceTick(gameId, token));
+      if (sub === "debug/round") return done(res, store.forceRound(gameId, token));
     }
 
     sendJson(res, 404, { error: "Not found." });
